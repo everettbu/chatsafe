@@ -10,23 +10,23 @@ ChatSafe is a local-first, privacy-preserving chat assistant. We use Claude Code
 ### ✅ Working Components
 1. **Local Inference Engine**
    - llama.cpp built with Metal GPU support on macOS
-   - **UPGRADED**: Llama-3.2-3B-Instruct Q4_K_M (replacing TinyLlama)
+   - **Model**: Llama-3.2-3B-Instruct Q4_K_M (2GB)
    - Model path: `~/.local/share/chatsafe/models/llama-3.2-3b-instruct-q4_k_m.gguf`
    - Context window: 8192 tokens
+   - ~50-70 tokens/sec on M4 Mac
 
 2. **HTTP API Server** 
    - Running on `http://127.0.0.1:8081` (localhost only)
    - OpenAI-compatible endpoint: `/v1/chat/completions`
-   - SSE streaming support
+   - SSE streaming support (defaults to on, use `"stream": false` for JSON)
    - Architecture: Rust server → llama-server subprocess → Model
-   - New endpoint: `/version` (returns model info)
+   - Additional endpoints: `/healthz`, `/version`
    
-3. **Llama-3 Chat Template**
-   - Proper Llama-3 Instruct formatting with headers
-   - Stop sequences: `<|eot_id|>`, `<|end_of_text|>`, `<|start_header_id|>`
-   - Default system prompt for conciseness
+3. **Chat Interface**
+   - `./chat.sh` - Interactive chat script (requires `"stream": false`)
+   - `./test_golden.sh` - Test suite for quality checks
 
-3. **Working Test Commands**
+4. **Working Test Commands**
    ```bash
    # Start server
    ./target/release/chatsafe-server
@@ -39,17 +39,18 @@ ChatSafe is a local-first, privacy-preserving chat assistant. We use Claude Code
 
 ### 🚧 Known Issues
 - Streaming returns full response in one chunk (not token-by-token yet)
-- Model download required on first run (~2GB)
   
-### Model Upgrade Complete
-- **Replaced TinyLlama 1.1B → Llama-3.2-3B-Instruct Q4_K_M**
-- Optimized parameters for Llama-3:
+### Configuration
+- **Model**: Llama-3.2-3B-Instruct Q4_K_M (only model)
+- **Template**: Llama-3 Instruct format with proper headers
+- **Stop sequences**: `<|eot_id|>`, `<|end_of_text|>`, `<|start_header_id|>`
+- **Defaults**:
   - temperature=0.6, top_p=0.9, top_k=40, repeat_penalty=1.15
-  - max_tokens=256 (default, configurable per request)
-- Expected quality improvements:
+  - max_tokens=256 (configurable per request)
+- **Quality**: 
   - Coherent, concise responses
-  - Accurate math and reasoning
-  - Better instruction following
+  - Accurate math and reasoning  
+  - Good instruction following
 
 ## Scope
 - Focus on **incremental tasks** (well-defined changes or modules).
