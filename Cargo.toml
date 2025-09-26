@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/infer-runtime",
+    "crates/local-api",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["ChatSafe Team"]
+license = "MIT"
+
+[workspace.dependencies]
+# Core dependencies
+tokio = { version = "1.43", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# For SSE streaming
+async-stream = "0.3"
+futures = "0.3"
+bytes = "1.8"

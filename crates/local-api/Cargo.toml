@@ -1,0 +1,25 @@
+[package]
+name = "local-api"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "chatsafe-server"
+path = "src/main.rs"
+
+[dependencies]
+infer-runtime = { path = "../infer-runtime" }
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+async-stream.workspace = true
+futures.workspace = true
+bytes.workspace = true
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio-stream = "0.1"
+uuid = { version = "1.11", features = ["v4", "serde"] }
