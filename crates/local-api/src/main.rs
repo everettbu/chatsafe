@@ -1,17 +1,18 @@
 use anyhow::Result;
 use axum::{
     extract::State,
-    http::StatusCode,
-    response::{sse::Event, IntoResponse, Response, Sse},
+    response::{sse::Event, IntoResponse, Sse},
     routing::{get, post},
     Json, Router,
 };
 use futures::stream::Stream;
+use futures::StreamExt;
+use std::pin::Pin;
 use infer_runtime::{InferenceConfig, InferenceRuntime};
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, net::SocketAddr, sync::Arc, path::PathBuf};
 use tokio::sync::RwLock;
-use tokio_stream::{self as stream, StreamExt};
+use tokio_stream as stream;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -161,6 +162,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/healthz", get(health_check))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/models", get(list_models))
         .route("/version", get(version_info))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -197,6 +199,21 @@ async fn version_info(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
+async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "object": "list",
+        "data": [{
+            "id": state.model_id,
+            "object": "model",
+            "created": 1700000000,  // Placeholder timestamp
+            "owned_by": "local",
+            "permission": [],
+            "root": state.model_id,
+            "parent": null,
+        }]
+    }))
+}
+
 async fn chat_completions(
     State(state): State<AppState>,
     Json(request): Json<ChatCompletionRequest>,
@@ -210,13 +227,11 @@ async fn chat_completions(
     let max_tokens = request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     
     if stream {
-        // For now, return a simple non-streaming response wrapped as SSE
-        // (Full streaming would require using llama-server's SSE endpoint)
+        // Use llama-server's streaming endpoint for real token-by-token streaming
         let runtime = state.runtime.read().await;
-        match runtime.complete(prompt.clone(), temperature, max_tokens).await {
-            Ok(response) => {
-                let content = clean_response(&response.content);
-                let stream = create_simple_sse_stream(content, state.model_id.clone());
+        match runtime.complete_stream(prompt.clone(), temperature, max_tokens).await {
+            Ok(chunk_stream) => {
+                let stream = create_proper_sse_stream(chunk_stream, state.model_id.clone());
                 Sse::new(stream).into_response()
             }
             Err(e) => {
@@ -268,27 +283,92 @@ async fn chat_completions(
     }
 }
 
-fn create_simple_sse_stream(content: String, model_id: String) -> impl Stream<Item = Result<Event, Infallible>> {
-    let chunk = ChatCompletionChunk {
-        id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-        object: "chat.completion.chunk".to_string(),
-        created: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        model: model_id,
-        choices: vec![ChunkChoice {
-            index: 0,
-            delta: Delta {
-                content: Some(content),
-                role: None,
-            },
-            finish_reason: None,
-        }],
-    };
+fn create_proper_sse_stream(
+    mut chunk_stream: Pin<Box<dyn Stream<Item = Result<infer_runtime::StreamChunk, anyhow::Error>> + Send>>,
+    model_id: String,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     
-    stream::once(Ok(Event::default().data(serde_json::to_string(&chunk).unwrap_or_default())))
-        .chain(stream::once(Ok(Event::default().data("[DONE]"))))
+    async_stream::stream! {
+        // First chunk: send role
+        let first_chunk = ChatCompletionChunk {
+            id: id.clone(),
+            object: "chat.completion.chunk".to_string(),
+            created,
+            model: model_id.clone(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: Delta {
+                    content: None,
+                    role: Some("assistant".to_string()),
+                },
+                finish_reason: None,
+            }],
+        };
+        yield Ok(Event::default().data(serde_json::to_string(&first_chunk).unwrap_or_default()));
+        
+        // Stream content chunks
+        let mut buffer = String::new();
+        while let Some(result) = chunk_stream.next().await {
+            match result {
+                Ok(chunk) => {
+                    let content = clean_response(&chunk.content);
+                    if !content.is_empty() {
+                        buffer.push_str(&content);
+                        
+                        // Send chunk with content delta
+                        let chunk_msg = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk".to_string(),
+                            created,
+                            model: model_id.clone(),
+                            choices: vec![ChunkChoice {
+                                index: 0,
+                                delta: Delta {
+                                    content: Some(content),
+                                    role: None,
+                                },
+                                finish_reason: None,
+                            }],
+                        };
+                        yield Ok(Event::default().data(serde_json::to_string(&chunk_msg).unwrap_or_default()));
+                    }
+                    
+                    // Check if this is the final chunk
+                    if chunk.stop.unwrap_or(false) {
+                        // Send finish reason chunk
+                        let finish_chunk = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk".to_string(),
+                            created,
+                            model: model_id.clone(),
+                            choices: vec![ChunkChoice {
+                                index: 0,
+                                delta: Delta {
+                                    content: None,
+                                    role: None,
+                                },
+                                finish_reason: Some("stop".to_string()),
+                            }],
+                        };
+                        yield Ok(Event::default().data(serde_json::to_string(&finish_chunk).unwrap_or_default()));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Stream error: {}", e);
+                    break;
+                }
+            }
+        }
+        
+        // Send [DONE] marker
+        yield Ok(Event::default().data("[DONE]"));
+    }
 }
 
 fn create_error_sse_stream(error: String) -> impl Stream<Item = Result<Event, Infallible>> {
@@ -342,25 +422,60 @@ fn clean_response(content: &str) -> String {
     // Remove any Llama-3 template artifacts from the response
     let mut cleaned = content.to_string();
     
-    // Remove all template markers
-    let markers = [
+    // Remove Llama-3 specific template markers
+    let template_markers = [
         "<|eot_id|>",
         "<|end_of_text|>",
         "<|start_header_id|>",
         "<|end_header_id|>",
-        "assistant",
-        "user",
-        "system",
+        "<|begin_of_text|>",
     ];
     
-    for marker in &markers {
+    for marker in &template_markers {
         cleaned = cleaned.replace(marker, "");
     }
     
-    // Clean up whitespace
+    // Remove role headers ONLY when they appear with template markers
+    // Pattern: <|start_header_id|>role<|end_header_id|>
+    cleaned = cleaned
+        .replace("<|start_header_id|>assistant<|end_header_id|>", "")
+        .replace("<|start_header_id|>user<|end_header_id|>", "")
+        .replace("<|start_header_id|>system<|end_header_id|>", "");
+    
+    // Remove common role pollution patterns that shouldn't appear
+    let role_pollution_patterns = [
+        "AI: ",
+        "AI:",
+        "Assistant: ",
+        "Assistant:",
+        "You: ",
+        "You:",
+        "User: ",
+        "User:",
+        "Human: ",
+        "Human:",
+    ];
+    
+    for pattern in &role_pollution_patterns {
+        // Only remove if at the beginning of a line
+        cleaned = cleaned
+            .lines()
+            .map(|line| {
+                if line.starts_with(pattern) {
+                    line[pattern.len()..].to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    
+    // Clean up excessive whitespace but preserve paragraph structure
     cleaned
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
         .trim()

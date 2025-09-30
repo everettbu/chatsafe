@@ -37,8 +37,14 @@ ChatSafe is a local-first, privacy-preserving chat assistant. We use Claude Code
      -d '{"messages": [{"role": "user", "content": "Hello"}], "stream": false}'
    ```
 
-### 🚧 Known Issues
+### 🚧 Known Issues  
 - Streaming returns full response in one chunk (not token-by-token yet)
+
+### 🛠️ Recent Fixes (2025-09-30)
+- Fixed role pollution (AI:/You:) in responses
+- Improved template marker cleaning to prevent instruction leakage  
+- Added prompt truncation to prevent context overflow
+- Enhanced response cleaning to remove role labels only at line start
   
 ### Configuration
 - **Model**: Llama-3.2-3B-Instruct Q4_K_M (only model)
