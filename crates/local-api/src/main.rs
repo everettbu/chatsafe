@@ -17,7 +17,7 @@ use futures::stream::Stream;
 use futures::StreamExt;
 use serde_json::json;
 use std::{convert::Infallible, net::SocketAddr, sync::Arc, path::PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_stream as stream;
 use tower_http::trace::TraceLayer;
@@ -152,7 +152,7 @@ async fn chat_completion(
             object: "chat.completion".to_string(),
             created: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_else(|_| Duration::from_secs(0))
                 .as_secs() as i64,
             model: model_id,
             choices: vec![Choice {
@@ -178,7 +178,7 @@ fn streaming_response(
         let request_id = uuid::Uuid::new_v4().to_string();
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs() as i64;
         
         while let Some(frame_result) = stream.next().await {
@@ -200,7 +200,13 @@ fn streaming_response(
                         }],
                     };
                     
-                    let data = serde_json::to_string(&chunk).unwrap_or_default();
+                    let data = match serde_json::to_string(&chunk) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!("Failed to serialize start chunk: {}", e);
+                            continue;
+                        }
+                    };
                     yield Ok(Event::default().data(data));
                 }
                 Ok(StreamFrame::Delta { content }) => {
@@ -220,7 +226,13 @@ fn streaming_response(
                         }],
                     };
                     
-                    let data = serde_json::to_string(&chunk).unwrap_or_default();
+                    let data = match serde_json::to_string(&chunk) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!("Failed to serialize delta chunk: {}", e);
+                            continue;
+                        }
+                    };
                     yield Ok(Event::default().data(data));
                 }
                 Ok(StreamFrame::Done { finish_reason, .. }) => {
@@ -240,7 +252,14 @@ fn streaming_response(
                         }],
                     };
                     
-                    let data = serde_json::to_string(&chunk).unwrap_or_default();
+                    let data = match serde_json::to_string(&chunk) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!("Failed to serialize final chunk: {}", e);
+                            yield Ok(Event::default().data("[DONE]"));
+                            break;
+                        }
+                    };
                     yield Ok(Event::default().data(data));
                     
                     // Send [DONE] marker

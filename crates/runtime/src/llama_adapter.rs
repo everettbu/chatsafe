@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, oneshot};
-use tokio::time::{sleep, Duration};
-use tracing::{info, warn, debug};
+use tokio::time::{sleep, Duration, timeout};
+use tracing::{info, warn, debug, error};
 
 /// Adapter for llama.cpp server
 pub struct LlamaAdapter {
@@ -35,25 +35,27 @@ impl LlamaAdapter {
         model_config: ModelConfig,
         template_config: TemplateConfig,
         runtime_config: RuntimeConfig,
-    ) -> Self {
+    ) -> Result<Self> {
         let server_url = format!("http://127.0.0.1:{}", runtime_config.llama_server_port);
         
-        Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| Error::RuntimeError(format!("Failed to create HTTP client: {}", e)))?;
+        
+        Ok(Self {
             model_path,
             model_config,
             template_config,
             runtime_config,
             server_process: None,
-            client: Client::builder()
-                .timeout(Duration::from_secs(300))
-                .connect_timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
+            client,
             server_url,
             current_handle: None,
             start_time: SystemTime::now(),
             active_requests: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        }
+        })
     }
     
     fn build_prompt(&self, messages: &[Message]) -> String {
@@ -69,6 +71,122 @@ impl LlamaAdapter {
         );
         cleaned.content
     }
+    
+    /// Clean up any existing llama-server process
+    async fn cleanup_existing_process(&mut self) -> Result<()> {
+        // First, try to clean up our tracked process
+        if let Some(mut child) = self.server_process.take() {
+            info!("Cleaning up existing llama-server process");
+            
+            // Kill the process
+            if let Err(e) = child.kill().await {
+                debug!("Kill signal failed (process may already be dead): {}", e);
+            }
+            
+            // Wait for it to exit
+            match timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(status)) => {
+                    info!("Previous llama-server exited with status: {:?}", status);
+                }
+                Ok(Err(e)) => {
+                    warn!("Error waiting for process exit: {}", e);
+                }
+                Err(_) => {
+                    warn!("Timeout waiting for process to exit");
+                }
+            }
+        }
+        
+        // Also check for orphaned processes on our port using lsof
+        self.kill_orphaned_processes().await?;
+        
+        Ok(())
+    }
+    
+    /// Kill any orphaned llama-server processes on our port
+    async fn kill_orphaned_processes(&self) -> Result<()> {
+        let port = self.runtime_config.llama_server_port;
+        
+        // Use lsof to find processes listening on our port
+        let output = Command::new("lsof")
+            .args(&["-ti", &format!(":{}", port)])
+            .output()
+            .await;
+        
+        if let Ok(output) = output {
+            if output.status.success() && !output.stdout.is_empty() {
+                let pids = String::from_utf8_lossy(&output.stdout);
+                for pid_str in pids.lines() {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        warn!("Found orphaned process {} on port {}, killing it", pid, port);
+                        
+                        // Kill the process
+                        let _ = Command::new("kill")
+                            .args(&["-9", &pid.to_string()])
+                            .output()
+                            .await;
+                    }
+                }
+                
+                // Give processes time to die
+                sleep(Duration::from_millis(200)).await;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if the port is available
+    async fn is_port_available(&self) -> bool {
+        let port = self.runtime_config.llama_server_port;
+        
+        // Try to connect to the port
+        match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            Ok(_) => {
+                // Port is in use
+                false
+            }
+            Err(_) => {
+                // Port is available (connection refused)
+                true
+            }
+        }
+    }
+    
+    /// Wait for the server to become ready
+    async fn wait_for_ready(&mut self) -> Result<()> {
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 60;
+        
+        loop {
+            attempts += 1;
+            
+            if attempts > MAX_ATTEMPTS {
+                return Err(Error::RuntimeError(
+                    format!("Server failed to become ready after {} attempts", MAX_ATTEMPTS)
+                ));
+            }
+            
+            // Check if the process is still alive
+            if let Some(child) = &mut self.server_process {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(Error::RuntimeError(
+                        format!("llama-server process died with status: {:?}", status)
+                    ));
+                }
+            }
+            
+            // Try health check
+            if let Ok(health) = self.health().await {
+                if health.is_healthy {
+                    info!("Server ready after {} attempts", attempts);
+                    return Ok(());
+                }
+            }
+            
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -82,6 +200,19 @@ impl Runtime for LlamaAdapter {
         }
         
         info!("Loading model: {} from {}", model_id, self.model_path.display());
+        
+        // Clean up any existing process first
+        if let Err(e) = self.cleanup_existing_process().await {
+            warn!("Error during cleanup: {}", e);
+        }
+        
+        // Check if port is available before spawning
+        if !self.is_port_available().await {
+            return Err(Error::RuntimeError(format!(
+                "Port {} is already in use. Another llama-server instance may be running.",
+                self.runtime_config.llama_server_port
+            )));
+        }
         
         // Start llama.cpp server
         let mut cmd = Command::new("./llama.cpp/build/bin/llama-server");
@@ -121,24 +252,35 @@ impl Runtime for LlamaAdapter {
         
         self.server_process = Some(child);
         
-        // Wait for server to be ready
-        for i in 0..30 {
-            sleep(Duration::from_millis(500)).await;
-            if let Ok(health) = self.health().await {
-                if health.is_healthy {
-                    info!("Model loaded successfully after {} attempts", i + 1);
-                    let handle = ModelHandle {
-                        model_id: model_id.to_string(),
-                        loaded_at: SystemTime::now(),
-                        context_size: self.model_config.ctx_window,
-                    };
-                    self.current_handle = Some(handle.clone());
-                    return Ok(handle);
+        // Wait for server to be ready with timeout
+        let wait_result = timeout(Duration::from_secs(30), self.wait_for_ready()).await;
+        
+        match wait_result {
+            Ok(Ok(())) => {
+                info!("Model loaded successfully");
+                let handle = ModelHandle {
+                    model_id: model_id.to_string(),
+                    loaded_at: SystemTime::now(),
+                    context_size: self.model_config.ctx_window,
+                };
+                self.current_handle = Some(handle.clone());
+                Ok(handle)
+            }
+            Ok(Err(e)) => {
+                // Clean up the failed process
+                if let Err(cleanup_err) = self.cleanup_existing_process().await {
+                    error!("Failed to cleanup after startup failure: {}", cleanup_err);
                 }
+                Err(e)
+            }
+            Err(_) => {
+                // Timeout - clean up the process
+                if let Err(cleanup_err) = self.cleanup_existing_process().await {
+                    error!("Failed to cleanup after timeout: {}", cleanup_err);
+                }
+                Err(Error::RuntimeError("Timeout waiting for model to load".into()))
             }
         }
-        
-        Err(Error::RuntimeError("Failed to load model - server did not start".into()))
     }
     
     async fn get_handle(&self) -> Option<ModelHandle> {
@@ -218,12 +360,28 @@ impl Runtime for LlamaAdapter {
             });
             
             // Build streaming request with no timeout for SSE
-            let client = reqwest::Client::builder()
+            let client = match reqwest::Client::builder()
                 .timeout(Duration::from_secs(300)) // Long timeout for streaming
                 .build()
-                .unwrap();
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    yield Ok(StreamFrame::Error {
+                        message: format!("Failed to create HTTP client: {}", e),
+                    });
+                    return;
+                }
+            };
             
-            let request_json = serde_json::to_string(&request).unwrap();
+            let request_json = match serde_json::to_string(&request) {
+                Ok(json) => json,
+                Err(e) => {
+                    yield Ok(StreamFrame::Error {
+                        message: format!("Failed to serialize request: {}", e),
+                    });
+                    return;
+                }
+            };
             
             // Make request with cancellation support
             let response_future = client
@@ -401,10 +559,36 @@ impl Runtime for LlamaAdapter {
     
     async fn shutdown(&mut self) -> Result<()> {
         if let Some(mut child) = self.server_process.take() {
-            child.kill().await
-                .map_err(|e| Error::RuntimeError(format!("Failed to stop server: {}", e)))?;
+            // First try graceful termination
+            debug!("Sending termination signal to llama-server");
+            
+            // Send kill signal
+            if let Err(e) = child.kill().await {
+                warn!("Failed to send kill signal: {}", e);
+            }
+            
+            // Wait for the process to actually exit (with timeout)
+            match timeout(Duration::from_secs(5), child.wait()).await {
+                Ok(Ok(status)) => {
+                    info!("llama-server exited with status: {:?}", status);
+                }
+                Ok(Err(e)) => {
+                    error!("Error waiting for process exit: {}", e);
+                }
+                Err(_) => {
+                    error!("Timeout waiting for llama-server to exit, may have leaked process");
+                }
+            }
         }
+        
         self.current_handle = None;
+        
+        // Double-check port is released
+        sleep(Duration::from_millis(100)).await;
+        if !self.is_port_available().await {
+            warn!("Port {} still in use after shutdown", self.runtime_config.llama_server_port);
+        }
+        
         Ok(())
     }
 }

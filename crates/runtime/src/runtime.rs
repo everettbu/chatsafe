@@ -82,7 +82,7 @@ impl ModelRuntime {
             model_config.clone(),
             template.clone(),
             config.runtime.clone(),
-        );
+        )?;
         
         Ok(RuntimeHandle::new(Box::new(adapter)))
     }
