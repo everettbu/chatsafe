@@ -1,0 +1,70 @@
+{
+  "version": "1.0",
+  "templates": [
+    {
+      "id": "llama3",
+      "name": "Llama 3 Instruct",
+      "system_prefix": "<|start_header_id|>system<|end_header_id|>\n\n",
+      "system_suffix": "<|eot_id|>",
+      "user_prefix": "<|start_header_id|>user<|end_header_id|>\n\n",
+      "user_suffix": "<|eot_id|>",
+      "assistant_prefix": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+      "assistant_suffix": "<|eot_id|>",
+      "default_system_prompt": "You are a helpful, concise assistant."
+    }
+  ],
+  "models": [
+    {
+      "id": "fast-chat",
+      "name": "Fast Chat Model",
+      "path": "llama-3.2-3b-instruct-q4_k_m.gguf",
+      "ctx_window": 8192,
+      "template_id": "llama3",
+      "stop_sequences": ["<|eot_id|>", "<|end_of_text|>"],
+      "eos_token": "<|eot_id|>",
+      "defaults": {
+        "temperature": 0.5,
+        "top_p": 0.85,
+        "top_k": 30,
+        "repeat_penalty": 1.2,
+        "max_tokens": 200
+      },
+      "resources": {
+        "min_ram_gb": 3.0,
+        "est_disk_gb": 2.0,
+        "gpu_layers": -1,
+        "threads": 4
+      },
+      "default": true,
+      "metadata": {
+        "optimized_for": "quick_responses"
+      }
+    },
+    {
+      "id": "creative-chat",
+      "name": "Creative Chat Model",
+      "path": "llama-3.2-3b-instruct-q4_k_m.gguf",
+      "ctx_window": 8192,
+      "template_id": "llama3",
+      "stop_sequences": ["<|eot_id|>", "<|end_of_text|>"],
+      "eos_token": "<|eot_id|>",
+      "defaults": {
+        "temperature": 0.9,
+        "top_p": 0.95,
+        "top_k": 80,
+        "repeat_penalty": 1.05,
+        "max_tokens": 512
+      },
+      "resources": {
+        "min_ram_gb": 3.0,
+        "est_disk_gb": 2.0,
+        "gpu_layers": -1,
+        "threads": 4
+      },
+      "default": false,
+      "metadata": {
+        "optimized_for": "creative_writing"
+      }
+    }
+  ]
+}

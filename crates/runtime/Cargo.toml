@@ -1,0 +1,21 @@
+[package]
+name = "chatsafe-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chatsafe-common = { path = "../common" }
+chatsafe-config = { path = "../config" }
+async-trait = "0.1"
+async-stream = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1.0", features = ["v4"] }
+scopeguard = "1.2"

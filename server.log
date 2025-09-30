@@ -1,5 +1,0 @@
-[2m2025-09-30T18:23:09.887227Z[0m [32m INFO[0m [2mchatsafe_server[0m[2m:[0m Starting ChatSafe local API server
-[2m2025-09-30T18:23:09.887329Z[0m [32m INFO[0m [2mchatsafe_server[0m[2m:[0m Using model: /Users/everettbutler/.local/share/chatsafe/models/llama-3.2-3b-instruct-q4_k_m.gguf
-[2m2025-09-30T18:23:09.910273Z[0m [32m INFO[0m [2minfer_runtime[0m[2m:[0m Starting llama.cpp server with model: /Users/everettbutler/.local/share/chatsafe/models/llama-3.2-3b-instruct-q4_k_m.gguf
-[2m2025-09-30T18:23:12.426492Z[0m [32m INFO[0m [2minfer_runtime[0m[2m:[0m llama.cpp server started successfully
-[2m2025-09-30T18:23:12.427215Z[0m [32m INFO[0m [2mchatsafe_server[0m[2m:[0m Listening on http://127.0.0.1:8081 (localhost only)

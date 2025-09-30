@@ -1,7 +1,11 @@
 [workspace]
 members = [
-    "crates/infer-runtime",
+    "crates/common",
+    "crates/config", 
+    "crates/runtime",
     "crates/local-api",
+    "crates/store",
+    "crates/infer-runtime", # To be removed after migration
 ]
 resolver = "2"
 

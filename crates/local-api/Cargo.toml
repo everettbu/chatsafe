@@ -8,7 +8,9 @@ name = "chatsafe-server"
 path = "src/main.rs"
 
 [dependencies]
-infer-runtime = { path = "../infer-runtime" }
+chatsafe-common = { path = "../common" }
+chatsafe-config = { path = "../config" }
+chatsafe-runtime = { path = "../runtime" }
 tokio.workspace = true
 axum.workspace = true
 serde.workspace = true

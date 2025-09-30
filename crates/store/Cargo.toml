@@ -1,0 +1,12 @@
+[package]
+name = "chatsafe-store"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chatsafe-common = { path = "../common" }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,166 @@
+{
+  "version": "1.0",
+  "templates": [
+    {
+      "id": "llama3",
+      "name": "Llama 3 Instruct",
+      "system_prefix": "<|start_header_id|>system<|end_header_id|>\n\n",
+      "system_suffix": "<|eot_id|>",
+      "user_prefix": "<|start_header_id|>user<|end_header_id|>\n\n",
+      "user_suffix": "<|eot_id|>",
+      "assistant_prefix": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+      "assistant_suffix": "<|eot_id|>",
+      "default_system_prompt": "You are a concise, helpful assistant. Answer directly and briefly unless asked for detail."
+    },
+    {
+      "id": "chatml",
+      "name": "ChatML Format",
+      "system_prefix": "<|im_start|>system\n",
+      "system_suffix": "<|im_end|>\n",
+      "user_prefix": "<|im_start|>user\n",
+      "user_suffix": "<|im_end|>\n",
+      "assistant_prefix": "<|im_start|>assistant\n",
+      "assistant_suffix": "<|im_end|>\n",
+      "default_system_prompt": "You are a helpful AI assistant."
+    },
+    {
+      "id": "alpaca",
+      "name": "Alpaca Format",
+      "system_prefix": "",
+      "system_suffix": "\n\n",
+      "user_prefix": "### Instruction:\n",
+      "user_suffix": "\n\n",
+      "assistant_prefix": "### Response:\n",
+      "assistant_suffix": "\n\n",
+      "default_system_prompt": "Below is an instruction that describes a task. Write a response that appropriately completes the request."
+    }
+  ],
+  "models": [
+    {
+      "id": "llama-3.2-3b-instruct-q4_k_m",
+      "name": "Llama 3.2 3B Instruct (Q4_K_M)",
+      "path": "llama-3.2-3b-instruct-q4_k_m.gguf",
+      "ctx_window": 8192,
+      "template_id": "llama3",
+      "stop_sequences": [
+        "<|eot_id|>",
+        "<|end_of_text|>",
+        "<|start_header_id|>"
+      ],
+      "eos_token": "<|eot_id|>",
+      "defaults": {
+        "temperature": 0.6,
+        "top_p": 0.9,
+        "top_k": 40,
+        "repeat_penalty": 1.15,
+        "max_tokens": 256
+      },
+      "resources": {
+        "min_ram_gb": 3.0,
+        "est_disk_gb": 2.0,
+        "gpu_layers": -1,
+        "threads": 4
+      },
+      "default": true,
+      "metadata": {
+        "family": "llama",
+        "quantization": "q4_k_m",
+        "license": "llama3.2"
+      }
+    },
+    {
+      "id": "llama-3.2-3b-instruct-q8_0",
+      "name": "Llama 3.2 3B Instruct (Q8_0)",
+      "path": "llama-3.2-3b-instruct-q8_0.gguf",
+      "ctx_window": 8192,
+      "template_id": "llama3",
+      "stop_sequences": [
+        "<|eot_id|>",
+        "<|end_of_text|>",
+        "<|start_header_id|>"
+      ],
+      "eos_token": "<|eot_id|>",
+      "defaults": {
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "top_k": 40,
+        "repeat_penalty": 1.1,
+        "max_tokens": 512
+      },
+      "resources": {
+        "min_ram_gb": 4.0,
+        "est_disk_gb": 3.2,
+        "gpu_layers": -1,
+        "threads": 4
+      },
+      "default": false,
+      "metadata": {
+        "family": "llama",
+        "quantization": "q8_0",
+        "license": "llama3.2"
+      }
+    },
+    {
+      "id": "mistral-7b-instruct-q4_k_m",
+      "name": "Mistral 7B Instruct (Q4_K_M)",
+      "path": "mistral-7b-instruct-v0.3-q4_k_m.gguf",
+      "ctx_window": 32768,
+      "template_id": "chatml",
+      "stop_sequences": [
+        "<|im_end|>",
+        "</s>"
+      ],
+      "eos_token": "</s>",
+      "defaults": {
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 50,
+        "repeat_penalty": 1.1,
+        "max_tokens": 512
+      },
+      "resources": {
+        "min_ram_gb": 6.0,
+        "est_disk_gb": 4.4,
+        "gpu_layers": -1,
+        "threads": 6
+      },
+      "default": false,
+      "metadata": {
+        "family": "mistral",
+        "quantization": "q4_k_m",
+        "license": "apache-2.0"
+      }
+    },
+    {
+      "id": "phi-3-mini-4k-instruct-q4_k_m",
+      "name": "Phi-3 Mini 4K Instruct (Q4_K_M)",
+      "path": "phi-3-mini-4k-instruct-q4_k_m.gguf",
+      "ctx_window": 4096,
+      "template_id": "chatml",
+      "stop_sequences": [
+        "<|im_end|>",
+        "<|end|>"
+      ],
+      "eos_token": "<|end|>",
+      "defaults": {
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "top_k": 30,
+        "repeat_penalty": 1.05,
+        "max_tokens": 256
+      },
+      "resources": {
+        "min_ram_gb": 2.5,
+        "est_disk_gb": 2.3,
+        "gpu_layers": -1,
+        "threads": 4
+      },
+      "default": false,
+      "metadata": {
+        "family": "phi",
+        "quantization": "q4_k_m",
+        "license": "mit"
+      }
+    }
+  ]
+}
