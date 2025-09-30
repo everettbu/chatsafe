@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::Stdio;
+use std::process::{Stdio};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::process::{Child, Command};
@@ -95,11 +95,29 @@ impl Runtime for LlamaAdapter {
            .arg("--parallel").arg("4")
            .arg("--cont-batching")
            .arg("--flash-attn").arg("on")
-           .stdout(Stdio::piped())
-           .stderr(Stdio::piped());
+           .stdout(Stdio::null())  // Discard stdout to prevent blocking
+           .stderr(Stdio::null())  // Discard stderr to prevent blocking
+           .kill_on_drop(true);   // Kill subprocess if parent dies
         
-        let child = cmd.spawn()
+        let mut child = cmd.spawn()
             .map_err(|e| Error::RuntimeError(format!("Failed to start llama.cpp server: {}", e)))?;
+        
+        // Check if process started successfully
+        sleep(Duration::from_millis(100)).await;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(Error::RuntimeError(format!(
+                    "llama-server exited immediately with status: {:?}. Check if binary exists at ./llama.cpp/build/bin/llama-server",
+                    status
+                )));
+            }
+            Ok(None) => {
+                info!("llama-server process started successfully");
+            }
+            Err(e) => {
+                return Err(Error::RuntimeError(format!("Failed to check process status: {}", e)));
+            }
+        }
         
         self.server_process = Some(child);
         
@@ -199,9 +217,9 @@ impl Runtime for LlamaAdapter {
                 role: Role::Assistant,
             });
             
-            // Build streaming request
+            // Build streaming request with no timeout for SSE
             let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(0)) // No timeout for SSE
+                .timeout(Duration::from_secs(300)) // Long timeout for streaming
                 .build()
                 .unwrap();
             

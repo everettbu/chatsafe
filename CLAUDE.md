@@ -135,11 +135,44 @@ When any of these happen, **STOP and report the snag** instead of continuing wit
 ## Project Structure
 ```
 /crates
-  /infer-runtime    # Manages llama.cpp server subprocess
+  /common           # Shared DTOs, errors, streaming contracts
+  /config           # Model registry & configuration
+  /runtime          # Model runtime with template engine
   /local-api        # HTTP API server (Axum)
 /llama.cpp          # Built inference engine
 /models             # GGUF model files
 ```
+
+## ⚠️ Known Issues & Risk Areas
+
+### Critical Issues
+1. **Subprocess Management**: llama-server doesn't spawn properly on server start (requires manual start)
+2. **Resource Leaks**: No proper cleanup of piped stdout/stderr from subprocess
+3. **Memory Growth**: Unbounded accumulation of response content during streaming
+
+### Security Concerns
+- **No Rate Limiting**: Vulnerable to DoS attacks
+- **No Request Size Validation**: Could exceed context window
+- **Command Injection Risk**: Model paths passed directly to shell
+- **Missing Auth**: No authentication/authorization layer
+
+### Reliability Gaps
+- **No Health Checks**: Server can't detect if llama-server dies
+- **No Graceful Shutdown**: Processes killed abruptly
+- **No Retry Logic**: Network failures aren't recovered
+- **Orphaned Processes**: Subprocess remains if main server crashes
+
+### Operational Blind Spots
+- **No Metrics/Monitoring**: Can't track latency, errors, throughput
+- **Poor Observability**: Only debug logs, no structured logging
+- **No Request Tracing**: Can't debug issues in production
+- **Missing Backpressure**: Slow clients cause memory buildup
+
+### Streaming Protocol Issues
+- **No Heartbeat**: Long requests timeout on proxies
+- **Buffer Bloat**: SSE parsing buffer can grow unbounded
+- **Silent Frame Drops**: Malformed SSE frames ignored
+- **No Reconnection**: Connection drops require full restart
 
 ## Refactor Roadmap
 
