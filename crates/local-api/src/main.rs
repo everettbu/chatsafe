@@ -1,4 +1,7 @@
 use anyhow::Result;
+
+#[cfg(test)]
+mod tests;
 use axum::{
     extract::State,
     response::{sse::Event, IntoResponse, Sse},

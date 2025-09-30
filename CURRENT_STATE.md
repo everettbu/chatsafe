@@ -4,6 +4,18 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 
 ## Changelog
 
+### 2025-09-30: Test Organization & Security Tests
+- ✅ Organized all tests into `tests/` directory
+- ✅ Created comprehensive security test suite (command injection, path traversal)
+- ✅ Added main test runner script `run_tests.sh`
+- ✅ Created tests README with documentation
+- ✅ Added 12 unit tests for local-api module
+- ✅ Moved test coverage analysis to docs/
+- 📝 Security tests ready to run (may reveal vulnerabilities)
+Issues addressed:
+- No unit tests for local-api (Fixed ✅)
+- No command injection tests (Fixed ✅)
+
 ### 2025-09-30: Documentation & Organization
 - ✅ Created separate CURRENT_STATE.md for tracking progress
 - ✅ Added model registry documentation (docs/model_registry.md)

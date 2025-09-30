@@ -176,18 +176,21 @@ RUST_LOG=debug cargo run --bin chatsafe-server
 ### Testing
 
 ```bash
-# Unit tests
-cargo test
+# Run all tests
+./run_tests.sh
 
-# Integration tests
-./test_comprehensive.sh
+# Run specific test category
+./run_tests.sh --security
+./run_tests.sh --quick
+./run_tests.sh --unit
 
-# Golden tests (quality checks)
-./test_golden.sh
-
-# Role pollution tests
-./test_role_pollution.sh
+# Run individual test suites
+./tests/test_comprehensive.sh
+./tests/test_golden.sh
+./tests/test_security.sh
 ```
+
+See [tests/README.md](./tests/README.md) for detailed testing documentation.
 
 ### Project Structure
 
@@ -199,9 +202,16 @@ chatsafe/
 │   ├── runtime/         # LLM runtime and templating
 │   └── local-api/       # HTTP API server
 ├── docs/                # Technical documentation
-├── scripts/             # Utility scripts
-├── tests/              # Test suites
+│   ├── model_registry.md # Model configuration guide
+│   ├── errors.md        # Error handling reference
+│   └── test_coverage.md # Test gap analysis
+├── tests/              # All test suites
+│   ├── test_comprehensive.sh # Integration tests
+│   ├── test_golden.sh       # Quality tests
+│   ├── test_security.sh     # Security tests
+│   └── README.md            # Testing guide
 ├── llama.cpp/          # Git submodule (inference engine)
+├── run_tests.sh        # Main test runner
 ├── CLAUDE.md           # AI contributor guidelines
 ├── CURRENT_STATE.md    # Development changelog
 └── README.md           # This file
