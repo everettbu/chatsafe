@@ -275,11 +275,11 @@ vm_stat | grep "Pages free"
 
 ## Supported Models
 
-| Model | Size | Speed | Context |
-|-------|------|-------|---------|
-| Llama 3.2 3B (Q4) | 2GB | 50-70 tok/s | 8K |
-| Mistral 7B (Q4) | 4.4GB | 30-40 tok/s | 32K |
-| Phi-3 Mini (Q4) | 2.8GB | 60-80 tok/s | 4K |
+| Model | Size | Speed | Context | Status |
+|-------|------|-------|---------|--------|
+| Llama 3.2 3B (Q4_K_M) | 2GB | 50-70 tok/s | 8K | ✅ Active |
+
+*Note: Multi-model support infrastructure is in place. Additional models can be added to the registry when model switching is implemented.*
 
 ## Performance
 
