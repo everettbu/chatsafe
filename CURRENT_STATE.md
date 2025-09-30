@@ -34,9 +34,11 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 ### High Priority
 - **Unit Test Failure**: `test_streaming_stop_detection` failing (1/17)
 - **No Rate Limiting**: Vulnerable to DoS attacks
-- **Command Injection Risk**: Model paths passed directly to shell
+- **Command Injection Risk**: Model paths passed directly to shell (llama_adapter.rs:88)
 
 ### Medium Priority
+- **Incomplete Process Reaping**: Stdout/stderr not drained, no wait() after kill
+- **Health Check Timeout Missing**: Could block for 300s on default client timeout
 - **Missing Backpressure**: Slow clients cause memory buildup
 - **No Request Tracing**: Can't correlate individual requests
 - **Buffer Bloat**: SSE parsing buffer can grow unbounded
@@ -49,12 +51,12 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 ## Recently Fixed
 
 ### 2025-09-30
-- ✅ **Process Leaks**: Proper cleanup and port checking implemented
+- ✅ **Process Leaks**: Proper cleanup and port checking implemented (partially - see Incomplete Process Reaping)
 - ✅ **Resource Leaks**: Processes tracked and reaped on shutdown
 - ✅ **Memory Growth**: Arc usage reduces cloning overhead
 - ✅ **No Metrics**: Comprehensive metrics system at `/metrics`
 - ✅ **Poor Observability**: Structured metrics with latency tracking
-- ✅ **No Health Checks**: Basic health endpoint implemented
+- ✅ **No Health Checks**: Basic health endpoint implemented (but missing timeout)
 - ✅ **No Graceful Shutdown**: Proper shutdown handling added
 - ✅ **Orphaned Processes**: Subprocess cleanup on crash
 
@@ -93,9 +95,7 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 - **Registry**: `crates/config/src/default_registry.json`
 
 ### Supported Models
-- Llama 3.2 (3B) - Default
-- Mistral 7B Instruct
-- Phi-3 Mini
+- Llama 3.2 (3B) - Q4_K_M quantization (Currently only model)
 
 ### Quality Guarantees
 - ✅ No role pollution
