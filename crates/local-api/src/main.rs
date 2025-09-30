@@ -9,7 +9,7 @@ use chatsafe_common::{
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk,
     Message, Choice, StreamChoice, DeltaContent, Usage, Role, FinishReason,
     HealthResponse, HealthStatus, GenerationParams, StreamFrame,
-    Error as CommonError, ErrorResponse,
+    Error as CommonError, ErrorResponse, Metrics, MetricsSnapshot,
 };
 use chatsafe_config::{ConfigLoader, ModelRegistry, AppConfig};
 use chatsafe_runtime::{RuntimeHandle, ModelRuntime, ModelHandle};
@@ -30,6 +30,7 @@ struct AppState {
     registry: Arc<ModelRegistry>,
     model_handle: Arc<RwLock<Option<ModelHandle>>>,
     start_time: SystemTime,
+    metrics: Arc<Metrics>,
 }
 
 async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -62,8 +63,11 @@ async fn chat_completion(
     State(state): State<AppState>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, Json<ErrorResponse>)> {
+    let start_time = std::time::Instant::now();
+    
     // Validate request
     if let Err(e) = request.validate() {
+        state.metrics.record_error(e.error_type()).await;
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             Json(ErrorResponse::from(&e)),
@@ -81,9 +85,9 @@ async fn chat_completion(
         })?;
     
     // Get model config and create params
-    let model_id = handle.model_id.clone();
+    let model_id = &handle.model_id;
     let params = state.registry.apply_overrides(
-        &model_id,
+        model_id,
         request.temperature,
         request.max_tokens,
         request.top_p,
@@ -96,10 +100,14 @@ async fn chat_completion(
         )
     })?;
     
+    // Record metrics
+    let is_streaming = request.stream.unwrap_or(true);
+    state.metrics.record_request(&model_id, is_streaming).await;
+    
     // Convert messages
     let messages: Vec<Message> = request.messages;
     
-    if request.stream.unwrap_or(true) {
+    if is_streaming {
         // Streaming response
         let stream = state.runtime.generate(&handle, messages, params)
             .await
@@ -110,7 +118,14 @@ async fn chat_completion(
                 )
             })?;
         
-        Ok(streaming_response(stream, model_id).into_response())
+        // Record request duration on completion
+        let metrics = state.metrics.clone();
+        tokio::spawn(async move {
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            metrics.record_request_duration(duration_ms).await;
+        });
+        
+        Ok(streaming_response(stream, model_id.to_string(), state.metrics.clone()).into_response())
     } else {
         // Non-streaming response
         let mut stream = state.runtime.generate(&handle, messages, params.clone())
@@ -154,7 +169,7 @@ async fn chat_completion(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_else(|_| Duration::from_secs(0))
                 .as_secs() as i64,
-            model: model_id,
+            model: model_id.to_string(),
             choices: vec![Choice {
                 index: 0,
                 message: Message {
@@ -173,23 +188,30 @@ async fn chat_completion(
 fn streaming_response(
     mut stream: std::pin::Pin<Box<dyn Stream<Item = Result<StreamFrame, CommonError>> + Send>>,
     model_id: String,
+    metrics: Arc<Metrics>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let response_stream = async_stream::stream! {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        // Use Arc to avoid repeated cloning in the loop
+        let request_id = Arc::new(uuid::Uuid::new_v4().to_string());
+        let model_id = Arc::new(model_id);
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs() as i64;
+        
+        let mut first_token_recorded = false;
+        let stream_start = std::time::Instant::now();
+        let mut chunk_count = 0u64;
         
         while let Some(frame_result) = stream.next().await {
             match frame_result {
                 Ok(StreamFrame::Start { role, .. }) => {
                     // Send initial chunk with role
                     let chunk = ChatCompletionChunk {
-                        id: request_id.clone(),
+                        id: request_id.to_string(),
                         object: "chat.completion.chunk".to_string(),
                         created,
-                        model: model_id.clone(),
+                        model: model_id.to_string(),
                         choices: vec![StreamChoice {
                             index: 0,
                             delta: DeltaContent {
@@ -210,12 +232,23 @@ fn streaming_response(
                     yield Ok(Event::default().data(data));
                 }
                 Ok(StreamFrame::Delta { content }) => {
+                    // Record first token latency
+                    if !first_token_recorded {
+                        first_token_recorded = true;
+                        let latency_ms = stream_start.elapsed().as_millis() as u64;
+                        let m = metrics.clone();
+                        tokio::spawn(async move {
+                            m.record_first_token_latency(latency_ms).await;
+                        });
+                    }
+                    
+                    chunk_count += 1;
                     // Send content chunk
                     let chunk = ChatCompletionChunk {
-                        id: request_id.clone(),
+                        id: request_id.to_string(),
                         object: "chat.completion.chunk".to_string(),
                         created,
-                        model: model_id.clone(),
+                        model: model_id.to_string(),
                         choices: vec![StreamChoice {
                             index: 0,
                             delta: DeltaContent {
@@ -234,14 +267,20 @@ fn streaming_response(
                         }
                     };
                     yield Ok(Event::default().data(data));
+                    
+                    // Track chunks sent
+                    let m = metrics.clone();
+                    tokio::spawn(async move {
+                        m.record_chunk_sent().await;
+                    });
                 }
                 Ok(StreamFrame::Done { finish_reason, .. }) => {
                     // Send final chunk
                     let chunk = ChatCompletionChunk {
-                        id: request_id.clone(),
+                        id: request_id.to_string(),
                         object: "chat.completion.chunk".to_string(),
                         created,
-                        model: model_id.clone(),
+                        model: model_id.to_string(),
                         choices: vec![StreamChoice {
                             index: 0,
                             delta: DeltaContent {
@@ -294,8 +333,36 @@ fn streaming_response(
     Sse::new(response_stream)
 }
 
-async fn version() -> &'static str {
-    "ChatSafe API v0.1.0"
+async fn version() -> Json<serde_json::Value> {
+    Json(json!({
+        "version": "0.1.0",
+        "api": "ChatSafe Local API",
+        "model_api": "OpenAI Compatible"
+    }))
+}
+
+async fn get_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let models = state.registry.list_models();
+    let model_info: Vec<serde_json::Value> = models.iter().map(|id| {
+        if let Ok(model) = state.registry.get_model(id) {
+            json!({
+                "id": model.id,
+                "name": model.name,
+                "context_window": model.ctx_window,
+                "default": model.default
+            })
+        } else {
+            json!({"id": id})
+        }
+    }).collect();
+    
+    Json(json!({
+        "models": model_info
+    }))
+}
+
+async fn get_metrics(State(state): State<AppState>) -> Json<MetricsSnapshot> {
+    Json(state.metrics.get_snapshot().await)
 }
 
 #[tokio::main]
@@ -330,6 +397,7 @@ async fn main() -> Result<()> {
         registry: Arc::new(registry),
         model_handle: Arc::new(RwLock::new(Some(model_handle))),
         start_time: SystemTime::now(),
+        metrics: Arc::new(Metrics::new()),
     };
     
     // Build router
@@ -338,6 +406,8 @@ async fn main() -> Result<()> {
         .route("/healthz", get(health_check))
         .route("/health", get(health_check))
         .route("/version", get(version))
+        .route("/metrics", get(get_metrics))
+        .route("/models", get(get_models))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     

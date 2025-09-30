@@ -7,4 +7,4 @@ mod tests;
 
 pub use dto::*;
 pub use error::{Error, Result, ErrorResponse};
-pub use metrics::{MetricsProvider, NoOpMetrics};
+pub use metrics::{Metrics, MetricsSnapshot};

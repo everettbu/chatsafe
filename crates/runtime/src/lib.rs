@@ -5,6 +5,9 @@ pub mod template_engine;
 #[cfg(test)]
 mod pollution_tests;
 
+#[cfg(test)]
+mod tests;
+
 pub use runtime::{ModelRuntime, RuntimeHandle};
 pub use llama_adapter::LlamaAdapter;
 pub use template_engine::{TemplateEngine, CleanedResponse, StreamChunkResult};
@@ -13,12 +16,13 @@ use async_trait::async_trait;
 use chatsafe_common::{Message, GenerationParams, Result, StreamFrame};
 use futures::Stream;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Handle to a loaded model
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelHandle {
-    pub model_id: String,
+    pub model_id: Arc<str>,
     pub loaded_at: SystemTime,
     pub context_size: usize,
 }

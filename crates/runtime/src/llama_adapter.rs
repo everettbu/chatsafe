@@ -259,7 +259,7 @@ impl Runtime for LlamaAdapter {
             Ok(Ok(())) => {
                 info!("Model loaded successfully");
                 let handle = ModelHandle {
-                    model_id: model_id.to_string(),
+                    model_id: Arc::from(model_id),
                     loaded_at: SystemTime::now(),
                     context_size: self.model_config.ctx_window,
                 };
@@ -325,27 +325,28 @@ impl Runtime for LlamaAdapter {
         };
         
         let url = format!("{}/completion", self.server_url);
-        let template = self.template_config.clone();
-        let stop_sequences = self.model_config.stop_sequences.clone();
-        let eos_token = self.model_config.eos_token.clone();
-        let model_id = self.model_config.id.clone();
+        // Use references where possible, Arc for values moved into async block
+        let template = Arc::new(self.template_config.clone());
+        let stop_sequences = Arc::new(self.model_config.stop_sequences.clone());
+        let eos_token = Arc::new(self.model_config.eos_token.clone());
+        let model_id = Arc::new(self.model_config.id.clone());
+        let request_id_arc = Arc::new(request_id.clone());
         
         // Setup cancellation
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         let active_reqs = self.active_requests.clone();
-        let req_id = request_id.clone();
         
         // Register active request
         {
             let mut reqs = active_reqs.write().await;
-            reqs.insert(req_id.clone(), cancel_tx);
+            reqs.insert(request_id_arc.to_string(), cancel_tx);
         }
         
         let stream = async_stream::stream! {
             // Track cleanup
             let _cleanup = scopeguard::guard((), |_| {
                 let reqs = active_reqs.clone();
-                let id = req_id.clone();
+                let id = request_id_arc.to_string();
                 tokio::spawn(async move {
                     let mut r = reqs.write().await;
                     r.remove(&id);
@@ -354,8 +355,8 @@ impl Runtime for LlamaAdapter {
             
             // Send start frame immediately
             yield Ok(StreamFrame::Start {
-                id: request_id.clone(),
-                model: model_id.clone(),
+                id: request_id_arc.to_string(),
+                model: model_id.to_string(),
                 role: Role::Assistant,
             });
             
