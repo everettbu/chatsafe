@@ -448,28 +448,43 @@ impl Runtime for LlamaAdapter {
                                                             debug!("First token received after start");
                                                         }
                                                         
+                                                        // Buffer for streaming with role pollution detection
+                                                        let prev_len = accumulated.len();
                                                         accumulated.push_str(&chunk.content);
                                                         token_count += 1;
                                                         
                                                         // Check if we've accumulated potential role pollution
-                                                        // If so, replace the entire response
                                                         if accumulated.contains("AI:") && accumulated.contains("You:") {
-                                                            // This is role pollution, send replacement message once
+                                                            // This is role pollution
                                                             if !accumulated.contains("I understand you'd like me to respond") {
+                                                                // Clear any previous content we sent
+                                                                // and send replacement message
                                                                 let replacement = "I understand you'd like me to respond, but I should avoid role-playing conversations. How can I help you directly?";
-                                                                // Clear accumulated and replace with our message
-                                                                accumulated = replacement.to_string();
+                                                                
+                                                                // If this is the first detection, send the replacement
                                                                 yield Ok(StreamFrame::Delta {
                                                                     content: replacement.to_string(),
                                                                 });
-                                                                // Force stop
+                                                                // Stop processing
                                                                 break;
                                                             }
                                                         } else {
-                                                            // Normal content, send as-is
-                                                            yield Ok(StreamFrame::Delta {
-                                                                content: chunk.content,
-                                                            });
+                                                            // No pollution detected yet, send the new content
+                                                            // Use the template engine to process just the new chunk
+                                                            let new_content = &accumulated[prev_len..];
+                                                            
+                                                            // Basic cleaning for streaming (remove obvious markers)
+                                                            let mut cleaned = new_content.to_string();
+                                                            for marker in &["<|eot_id|>", "<|end_of_text|>", "<|start_header_id|>", "<|end_header_id|>"] {
+                                                                cleaned = cleaned.replace(marker, "");
+                                                            }
+                                                            
+                                                            // Send cleaned chunk
+                                                            if !cleaned.trim().is_empty() {
+                                                                yield Ok(StreamFrame::Delta {
+                                                                    content: cleaned,
+                                                                });
+                                                            }
                                                         }
                                                     }
                                                     

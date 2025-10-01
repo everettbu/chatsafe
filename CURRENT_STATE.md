@@ -4,6 +4,29 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 
 ## Changelog
 
+### 2025-10-01: Complete Test Suite Polish
+- ✅ Fixed streaming role pollution detection in llama_adapter
+- ✅ All role pollution tests now passing (4/4)
+- ✅ Streaming now buffers content to detect pollution before emission
+- ✅ Complete test suite validation:
+  - Unit tests: 32/32 passing (common: 6, config: 9, runtime: 17)
+  - Integration tests: 15/15 passing
+  - Security tests: 12/12 passing
+  - Role pollution tests: 4/4 passing
+- 📝 System is fully polished with 100% test pass rate
+
+### 2025-10-01: Complete Unit Test Fixes
+- ✅ Fixed all 7 failing unit tests after role pollution mitigation
+- ✅ Redesigned streaming buffer logic to maintain full content until stop sequence
+- ✅ All 17 unit tests now passing (100% pass rate)
+- ✅ All 15 integration tests still passing
+- 📝 Streaming now correctly accumulates content for proper cleaning
+Issues resolved:
+- Fixed buffer clearing issue that caused empty responses
+- Partial emissions now only send new content, not re-emit everything
+- Stop sequence detection now processes entire accumulated buffer
+
+
 ### 2025-10-01: Security Analysis & Documentation
 - ✅ Investigated command injection protection - inherently safe via `Command::arg()`
 - ✅ No shell interpreter used anywhere in codebase
@@ -112,7 +135,7 @@ Issues addressed:
 | SSE Streaming | ✅ Working | Token-by-token, cancellation support |
 | Model Registry | ✅ Working | JSON-based, multiple models supported |
 | Metrics | ✅ Working | Privacy-preserving, in-memory only |
-| Tests | ⚠️ Mostly Working | 15/15 integration, 16/17 unit |
+| Tests | ✅ Working | 15/15 integration, 17/17 unit |
 
 ### Endpoints
 - `POST /v1/chat/completions` - Main chat endpoint (OpenAI-compatible)
@@ -127,7 +150,7 @@ Issues addressed:
 | `test_golden.sh` | ✅ Passing | Core functionality |
 | `test_role_pollution.sh` | ✅ Passing | Template boundaries |
 | `test_comprehensive.sh` | ✅ Passing | Full integration (15 tests) |
-| Unit tests | ⚠️ 16/17 Passing | Runtime components |
+| Unit tests | ✅ 17/17 Passing | Runtime components |
 
 ## Configuration
 

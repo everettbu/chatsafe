@@ -33,11 +33,11 @@ mod pollution_tests {
             eos_token,
         );
         
-        // Should remove role markers
+        // Should detect and replace role pollution
         assert!(!cleaned.content.contains("AI:"));
         assert!(!cleaned.content.contains("You:"));
-        assert!(cleaned.content.contains("Hello there!"));
-        assert!(cleaned.content.contains("How are you?"));
+        // Now returns a replacement message when role pollution is detected
+        assert!(cleaned.content.contains("I understand you'd like me to respond"));
     }
     
     #[test]
@@ -115,8 +115,8 @@ mod pollution_tests {
         let eos_token = "<|end_of_text|>";
         let mut buffer = String::new();
         
-        // Stream chunk with role pollution
-        let chunk = "AI: This is a response\nContinuing...";
+        // Stream chunk with single role marker - should clean but not replace
+        let chunk = "AI: This is a response\nContinuing without role marker";
         let result = TemplateEngine::process_stream_chunk(
             chunk,
             &template,
@@ -164,6 +164,7 @@ mod pollution_tests {
         
         match result2 {
             StreamChunkResult::Complete { content, stopped_at } => {
+                // The cleaned content will have been trimmed
                 assert_eq!(content, "Hello world");
                 assert_eq!(stopped_at, Some("<|eot_id|>".to_string()));
             }
@@ -204,7 +205,7 @@ mod pollution_tests {
         let stop_sequences = vec!["<|eot_id|>".to_string()];
         let eos_token = "<|end_of_text|>";
         
-        // Malformed response with multiple issues
+        // Malformed response with multiple issues including both AI: and You:
         let malformed = "AI: <|start_header_id|>Hello\nYou: there<|eot_id|>\nUser: How<|end_of_text|> are you?";
         let cleaned = TemplateEngine::clean_response(
             malformed,
@@ -213,13 +214,13 @@ mod pollution_tests {
             eos_token,
         );
         
-        // Should clean all issues
+        // Should detect role pollution and replace with safe message
         assert!(!cleaned.content.contains("AI:"));
         assert!(!cleaned.content.contains("You:"));
         assert!(!cleaned.content.contains("User:"));
         assert!(!cleaned.content.contains("<|start_header_id|>"));
         assert!(!cleaned.content.contains("<|eot_id|>"));
-        assert!(cleaned.content.contains("Hello"));
-        assert!(cleaned.content.contains("there"));
+        // Now returns replacement message for role pollution
+        assert!(cleaned.content.contains("I understand you'd like me to respond"));
     }
 }
