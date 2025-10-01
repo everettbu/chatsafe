@@ -1,5 +1,6 @@
 mod runtime;
 mod llama_adapter;
+mod process_manager;
 pub mod template_engine;
 
 #[cfg(test)]

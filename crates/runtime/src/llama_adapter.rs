@@ -7,10 +7,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::{Stdio};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::{RwLock, oneshot};
 use tokio::time::{sleep, Duration, timeout};
 use tracing::{info, warn, debug, error};
@@ -21,7 +20,7 @@ pub struct LlamaAdapter {
     model_config: ModelConfig,
     template_config: TemplateConfig,
     runtime_config: RuntimeConfig,
-    server_process: Option<Child>,
+    process_manager: crate::process_manager::ProcessManager,
     client: Client,
     server_url: String,
     current_handle: Option<ModelHandle>,
@@ -49,7 +48,7 @@ impl LlamaAdapter {
             model_config,
             template_config,
             runtime_config,
-            server_process: None,
+            process_manager: crate::process_manager::ProcessManager::new("llama-server".to_string()),
             client,
             server_url,
             current_handle: None,
@@ -74,28 +73,8 @@ impl LlamaAdapter {
     
     /// Clean up any existing llama-server process
     async fn cleanup_existing_process(&mut self) -> Result<()> {
-        // First, try to clean up our tracked process
-        if let Some(mut child) = self.server_process.take() {
-            info!("Cleaning up existing llama-server process");
-            
-            // Kill the process
-            if let Err(e) = child.kill().await {
-                debug!("Kill signal failed (process may already be dead): {}", e);
-            }
-            
-            // Wait for it to exit
-            match timeout(Duration::from_secs(2), child.wait()).await {
-                Ok(Ok(status)) => {
-                    info!("Previous llama-server exited with status: {:?}", status);
-                }
-                Ok(Err(e)) => {
-                    warn!("Error waiting for process exit: {}", e);
-                }
-                Err(_) => {
-                    warn!("Timeout waiting for process to exit");
-                }
-            }
-        }
+        // Use ProcessManager to clean up any tracked process
+        self.process_manager.cleanup().await?;
         
         // Also check for orphaned processes on our port using lsof
         self.kill_orphaned_processes().await?;
@@ -168,12 +147,10 @@ impl LlamaAdapter {
             }
             
             // Check if the process is still alive
-            if let Some(child) = &mut self.server_process {
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Err(Error::RuntimeError(
-                        format!("llama-server process died with status: {:?}", status)
-                    ));
-                }
+            if !self.process_manager.is_running() {
+                return Err(Error::RuntimeError(
+                    "llama-server process died unexpectedly".to_string()
+                ));
             }
             
             // Try health check
@@ -214,7 +191,7 @@ impl Runtime for LlamaAdapter {
             )));
         }
         
-        // Start llama.cpp server
+        // Start llama.cpp server using ProcessManager
         let mut cmd = Command::new("./llama.cpp/build/bin/llama-server");
         cmd.arg("--model").arg(&self.model_path)
            .arg("--ctx-size").arg(self.model_config.ctx_window.to_string())
@@ -225,32 +202,21 @@ impl Runtime for LlamaAdapter {
            .arg("--n-predict").arg("-1")
            .arg("--parallel").arg("4")
            .arg("--cont-batching")
-           .arg("--flash-attn").arg("on")
-           .stdout(Stdio::null())  // Discard stdout to prevent blocking
-           .stderr(Stdio::null())  // Discard stderr to prevent blocking
-           .kill_on_drop(true);   // Kill subprocess if parent dies
+           .arg("--flash-attn").arg("on");
         
-        let mut child = cmd.spawn()
+        // Spawn with proper stdout/stderr draining
+        self.process_manager.spawn(cmd).await
             .map_err(|e| Error::RuntimeError(format!("Failed to start llama.cpp server: {}", e)))?;
         
         // Check if process started successfully
         sleep(Duration::from_millis(100)).await;
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Err(Error::RuntimeError(format!(
-                    "llama-server exited immediately with status: {:?}. Check if binary exists at ./llama.cpp/build/bin/llama-server",
-                    status
-                )));
-            }
-            Ok(None) => {
-                info!("llama-server process started successfully");
-            }
-            Err(e) => {
-                return Err(Error::RuntimeError(format!("Failed to check process status: {}", e)));
-            }
+        if !self.process_manager.is_running() {
+            return Err(Error::RuntimeError(
+                "llama-server exited immediately. Check if binary exists at ./llama.cpp/build/bin/llama-server".to_string()
+            ));
         }
         
-        self.server_process = Some(child);
+        info!("llama-server process started successfully");
         
         // Wait for server to be ready with timeout
         let wait_result = timeout(Duration::from_secs(30), self.wait_for_ready()).await;
@@ -589,28 +555,8 @@ impl Runtime for LlamaAdapter {
     }
     
     async fn shutdown(&mut self) -> Result<()> {
-        if let Some(mut child) = self.server_process.take() {
-            // First try graceful termination
-            debug!("Sending termination signal to llama-server");
-            
-            // Send kill signal
-            if let Err(e) = child.kill().await {
-                warn!("Failed to send kill signal: {}", e);
-            }
-            
-            // Wait for the process to actually exit (with timeout)
-            match timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(Ok(status)) => {
-                    info!("llama-server exited with status: {:?}", status);
-                }
-                Ok(Err(e)) => {
-                    error!("Error waiting for process exit: {}", e);
-                }
-                Err(_) => {
-                    error!("Timeout waiting for llama-server to exit, may have leaked process");
-                }
-            }
-        }
+        // Use ProcessManager for proper cleanup
+        self.process_manager.terminate().await?;
         
         self.current_handle = None;
         

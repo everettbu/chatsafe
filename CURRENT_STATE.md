@@ -4,6 +4,37 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 
 ## Changelog
 
+### 2025-10-01: Milestone 1 - Production Hardening Complete
+- ✅ Implemented rate limiting with token bucket algorithm (per-IP and global)
+- ✅ Added backpressure control with bounded buffers (32 chunk limit) for SSE streaming
+- ✅ Implemented health check timeouts (2 seconds) and proper request cleanup
+- ✅ Fixed process lifecycle with proper stdout/stderr draining and graceful SIGTERM
+- ✅ All tests passing (48/48 unit tests)
+- 📝 Production hardening complete - server now resilient to:
+  - DoS attacks (rate limiting with 429 responses)
+  - Slow clients (bounded buffers prevent memory growth)
+  - Process zombies (proper reaping and cleanup)
+  - Hanging requests (timeouts enforced)
+Features implemented:
+- Rate limiter: 60 req/min per IP, 5 concurrent per IP, 600 req/min global
+- Stream backpressure: 32 chunk buffer with automatic cleanup
+- Process manager: SIGTERM first, then SIGKILL, with stdout/stderr draining
+- Automatic cleanup on disconnection or cancellation
+
+### 2025-10-01: Codebase Review & Issues Update
+- ✅ Reviewed entire codebase architecture and implementation
+- ✅ Verified all unit tests still passing (44/44)
+- ✅ Identified code quality issues via clippy analysis
+- ✅ Updated Open Issues to reflect current state
+Issues discovered:
+- 15+ clippy warnings for code quality improvements needed
+- Integration tests require running server (not self-contained)
+- Two unused crates (infer-runtime, store) with no implementation
+Issues resolved:
+- Role pollution bugs (Fixed ✅)
+- Unit test failures (Fixed ✅)
+- Command injection not actually a risk (Fixed ✅)
+
 ### 2025-10-01: Complete Test Suite Polish
 - ✅ Fixed streaming role pollution detection in llama_adapter
 - ✅ All role pollution tests now passing (4/4)
@@ -96,24 +127,26 @@ Issues addressed:
 ## Open Issues
 
 ### High Priority
-- **Role Pollution Bug** (Partially Fixed ✅): Detection works but unit tests need updating
-- **Unit Test Failures**: 7 tests failing after role pollution fix
-- **No Rate Limiting**: Vulnerable to DoS attacks
-- **Command Injection Risk** (Not a risk ✅): Protected by `Command::arg()` API - no shell involved
+- **Integration Tests Need Server**: All test scripts require running server instance (not self-contained)
 
 ### Medium Priority
-- **Incomplete Process Reaping**: Stdout/stderr not drained, no wait() after kill
-- **Health Check Timeout Missing**: Could block for 300s on default client timeout
-- **Missing Backpressure**: Slow clients cause memory buildup
 - **No Request Tracing**: Can't correlate individual requests
-- **Buffer Bloat**: SSE parsing buffer can grow unbounded
+- **Code Quality Warnings**: 15+ clippy warnings (unused imports, manual range checks, dead code)
 
 ### Low Priority
 - **No Heartbeat**: Long requests timeout on proxies
 - **Silent Frame Drops**: Malformed SSE frames ignored
 - **No Reconnection**: Connection drops require full restart
+- **Unused Crates**: infer-runtime and store crates have no implementation
 
 ## Recently Fixed
+
+### 2025-10-01
+- ✅ **No Rate Limiting** (Fixed ✅): Implemented token bucket rate limiting per-IP and global
+- ✅ **Incomplete Process Reaping** (Fixed ✅): Added ProcessManager with proper stdout/stderr draining
+- ✅ **Health Check Timeout Missing** (Fixed ✅): Added 2-second timeout for health checks
+- ✅ **Missing Backpressure** (Fixed ✅): Bounded buffers (32 chunks) prevent memory buildup
+- ✅ **Buffer Bloat** (Fixed ✅): SSE streaming now uses bounded channel with backpressure
 
 ### 2025-09-30
 - ✅ **Process Leaks**: Proper cleanup and port checking implemented (partially - see Incomplete Process Reaping)

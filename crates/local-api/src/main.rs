@@ -1,12 +1,14 @@
 use anyhow::Result;
 
+mod rate_limiter;
 #[cfg(test)]
 mod tests;
 use axum::{
-    extract::State,
+    extract::{State, ConnectInfo},
     response::{sse::Event, IntoResponse, Sse},
     routing::{get, post},
     Json, Router,
+    middleware,
 };
 use chatsafe_common::{
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk,
@@ -19,11 +21,12 @@ use chatsafe_runtime::{RuntimeHandle, ModelRuntime, ModelHandle};
 use futures::stream::Stream;
 use futures::StreamExt;
 use serde_json::json;
-use std::{convert::Infallible, net::SocketAddr, sync::Arc, path::PathBuf};
+use std::{convert::Infallible, net::{SocketAddr, IpAddr}, sync::Arc, path::PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_stream as stream;
 use tower_http::trace::TraceLayer;
+use rate_limiter::{RateLimiter, RateLimiterConfig};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -34,6 +37,7 @@ struct AppState {
     model_handle: Arc<RwLock<Option<ModelHandle>>>,
     start_time: SystemTime,
     metrics: Arc<Metrics>,
+    rate_limiter: RateLimiter,
 }
 
 async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -64,9 +68,20 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
 
 async fn chat_completion(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, Json<ErrorResponse>)> {
     let start_time = std::time::Instant::now();
+    let ip = addr.ip();
+    
+    // Check rate limit
+    if let Err(e) = state.rate_limiter.check_rate_limit(ip).await {
+        state.metrics.record_error(e.error_type()).await;
+        return Err((
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse::from(&e)),
+        ));
+    }
     
     // Validate request
     if let Err(e) = request.validate() {
@@ -183,6 +198,13 @@ async fn chat_completion(
             }],
             usage,
         };
+        
+        // Release rate limit for non-streaming requests
+        state.rate_limiter.release_request(ip).await;
+        
+        // Record metrics
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        state.metrics.record_request_duration(duration_ms).await;
         
         Ok(Json(response).into_response())
     }
@@ -394,6 +416,9 @@ async fn main() -> Result<()> {
     
     let model_handle = runtime.load(&default_model.id).await?;
     
+    // Create rate limiter
+    let rate_limiter = RateLimiter::new(RateLimiterConfig::default());
+    
     // Create app state
     let state = AppState {
         runtime,
@@ -401,9 +426,10 @@ async fn main() -> Result<()> {
         model_handle: Arc::new(RwLock::new(Some(model_handle))),
         start_time: SystemTime::now(),
         metrics: Arc::new(Metrics::new()),
+        rate_limiter,
     };
     
-    // Build router
+    // Build router with tracing layer
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completion))
         .route("/healthz", get(health_check))
@@ -419,7 +445,13 @@ async fn main() -> Result<()> {
     info!("Listening on http://{} (localhost only)", addr);
     
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    
+    // Use into_make_service_with_connect_info to get client IP addresses
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>()
+    )
+    .await?;
     
     Ok(())
 }
