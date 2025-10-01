@@ -43,14 +43,22 @@ struct AppState {
 }
 
 async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    let health = state.runtime.health().await.unwrap_or_else(|_| {
-        chatsafe_runtime::RuntimeHealth {
-            is_healthy: false,
-            model_loaded: None,
-            active_requests: 0,
-            uptime_seconds: 0,
+    // Apply 2-second timeout to health check
+    let health_future = state.runtime.health();
+    let timeout_duration = Duration::from_secs(2);
+    
+    let health = match tokio::time::timeout(timeout_duration, health_future).await {
+        Ok(Ok(health)) => health,
+        Ok(Err(_)) | Err(_) => {
+            // Either runtime error or timeout - treat as unhealthy
+            chatsafe_runtime::RuntimeHealth {
+                is_healthy: false,
+                model_loaded: None,
+                active_requests: 0,
+                uptime_seconds: 0,
+            }
         }
-    });
+    };
     
     let uptime = state.start_time.elapsed()
         .unwrap_or_default()

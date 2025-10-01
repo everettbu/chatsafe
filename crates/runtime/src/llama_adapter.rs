@@ -529,7 +529,14 @@ impl Runtime for LlamaAdapter {
     async fn health(&self) -> Result<RuntimeHealth> {
         let url = format!("{}/health", self.server_url);
         
-        let is_healthy = match self.client.get(&url).send().await {
+        // Create a client with 2-second timeout specifically for health checks
+        let health_client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .connect_timeout(Duration::from_millis(500))
+            .build()
+            .map_err(|e| Error::RuntimeError(format!("Failed to create health check client: {}", e)))?;
+        
+        let is_healthy = match health_client.get(&url).send().await {
             Ok(response) => response.status().is_success(),
             Err(_) => false,
         };
