@@ -132,6 +132,8 @@ impl Error {
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: ErrorDetail,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +151,7 @@ impl From<&Error> for ErrorResponse {
                 r#type: err.error_type().to_string(),
                 code: err.status_code(),
             },
+            request_id: None,
         }
     }
 }

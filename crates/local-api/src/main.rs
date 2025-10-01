@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 mod rate_limiter;
+mod streaming;
 #[cfg(test)]
 mod tests;
 use axum::{
@@ -14,7 +15,8 @@ use chatsafe_common::{
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk,
     Message, Choice, StreamChoice, DeltaContent, Usage, Role, FinishReason,
     HealthResponse, HealthStatus, GenerationParams, StreamFrame,
-    Error as CommonError, ErrorResponse, Metrics, MetricsSnapshot,
+    Error as CommonError, ErrorResponse, ObservableMetrics, RequestId,
+    ObservableMetricsSnapshot,
 };
 use chatsafe_config::{ConfigLoader, ModelRegistry, AppConfig};
 use chatsafe_runtime::{RuntimeHandle, ModelRuntime, ModelHandle};
@@ -36,7 +38,7 @@ struct AppState {
     registry: Arc<ModelRegistry>,
     model_handle: Arc<RwLock<Option<ModelHandle>>>,
     start_time: SystemTime,
-    metrics: Arc<Metrics>,
+    metrics: Arc<ObservableMetrics>,
     rate_limiter: RateLimiter,
 }
 
@@ -74,21 +76,33 @@ async fn chat_completion(
     let start_time = std::time::Instant::now();
     let ip = addr.ip();
     
+    // Generate request ID for tracing
+    let request_id = RequestId::new();
+    
     // Check rate limit
     if let Err(e) = state.rate_limiter.check_rate_limit(ip).await {
-        state.metrics.record_error(e.error_type()).await;
+        state.metrics.record_error(Some(&request_id), &e).await;
+        state.metrics.record_rate_limit(ip.to_string()).await;
+        
+        let mut response = ErrorResponse::from(&e);
+        response.request_id = Some(request_id.to_string());
+        
         return Err((
             axum::http::StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse::from(&e)),
+            Json(response),
         ));
     }
     
     // Validate request
     if let Err(e) = request.validate() {
-        state.metrics.record_error(e.error_type()).await;
+        state.metrics.record_error(Some(&request_id), &e).await;
+        
+        let mut response = ErrorResponse::from(&e);
+        response.request_id = Some(request_id.to_string());
+        
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::from(&e)),
+            Json(response),
         ));
     }
     
@@ -104,7 +118,7 @@ async fn chat_completion(
     
     // Get model config and create params
     let model_id = &handle.model_id;
-    let params = state.registry.apply_overrides(
+    let mut params = state.registry.apply_overrides(
         model_id,
         request.temperature,
         request.max_tokens,
@@ -112,15 +126,35 @@ async fn chat_completion(
         request.top_k,
         request.repeat_penalty,
     ).map_err(|e| {
+        // Record error in background
+        {
+            let metrics = state.metrics.clone();
+            let req_id = request_id.clone();
+            let error_type = CommonError::ConfigError(e.to_string());
+            tokio::spawn(async move {
+                metrics.record_error(Some(&req_id), &error_type).await;
+            });
+        }
+        
+        let mut response = ErrorResponse::from(&e);
+        response.request_id = Some(request_id.to_string());
+        
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::from(&e)),
+            Json(response),
         )
     })?;
     
-    // Record metrics
+    // Add request ID to params for tracing
+    params.request_id = request_id.to_string();
+    
+    // Start tracking this request
     let is_streaming = request.stream.unwrap_or(true);
-    state.metrics.record_request(&model_id, is_streaming).await;
+    let tracked_request_id = state.metrics.start_request(
+        request_id.clone(),
+        model_id.to_string(),
+        is_streaming
+    ).await;
     
     // Convert messages
     let messages: Vec<Message> = request.messages;
@@ -136,14 +170,16 @@ async fn chat_completion(
                 )
             })?;
         
-        // Record request duration on completion
-        let metrics = state.metrics.clone();
-        tokio::spawn(async move {
-            let duration_ms = start_time.elapsed().as_millis() as u64;
-            metrics.record_request_duration(duration_ms).await;
-        });
+        // Request completion is handled by streaming module's CleanupGuard
         
-        Ok(streaming_response(stream, model_id.to_string(), state.metrics.clone()).into_response())
+        Ok(streaming::streaming_response_with_observability(
+            stream,
+            model_id.to_string(),
+            state.metrics.clone(),
+            state.rate_limiter.clone(),
+            ip,
+            tracked_request_id.clone()
+        ).into_response())
     } else {
         // Non-streaming response
         let mut stream = state.runtime.generate(&handle, messages, params.clone())
@@ -202,161 +238,18 @@ async fn chat_completion(
         // Release rate limit for non-streaming requests
         state.rate_limiter.release_request(ip).await;
         
-        // Record metrics
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-        state.metrics.record_request_duration(duration_ms).await;
+        // Complete request tracking
+        state.metrics.complete_request(&tracked_request_id).await;
         
         Ok(Json(response).into_response())
     }
 }
 
-fn streaming_response(
-    mut stream: std::pin::Pin<Box<dyn Stream<Item = Result<StreamFrame, CommonError>> + Send>>,
-    model_id: String,
-    metrics: Arc<Metrics>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let response_stream = async_stream::stream! {
-        // Use Arc to avoid repeated cloning in the loop
-        let request_id = Arc::new(uuid::Uuid::new_v4().to_string());
-        let model_id = Arc::new(model_id);
-        let created = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_secs() as i64;
-        
-        let mut first_token_recorded = false;
-        let stream_start = std::time::Instant::now();
-        let mut chunk_count = 0u64;
-        
-        while let Some(frame_result) = stream.next().await {
-            match frame_result {
-                Ok(StreamFrame::Start { role, .. }) => {
-                    // Send initial chunk with role
-                    let chunk = ChatCompletionChunk {
-                        id: request_id.to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created,
-                        model: model_id.to_string(),
-                        choices: vec![StreamChoice {
-                            index: 0,
-                            delta: DeltaContent {
-                                role: Some(role),
-                                content: None,
-                            },
-                            finish_reason: None,
-                        }],
-                    };
-                    
-                    let data = match serde_json::to_string(&chunk) {
-                        Ok(json) => json,
-                        Err(e) => {
-                            error!("Failed to serialize start chunk: {}", e);
-                            continue;
-                        }
-                    };
-                    yield Ok(Event::default().data(data));
-                }
-                Ok(StreamFrame::Delta { content }) => {
-                    // Record first token latency
-                    if !first_token_recorded {
-                        first_token_recorded = true;
-                        let latency_ms = stream_start.elapsed().as_millis() as u64;
-                        let m = metrics.clone();
-                        tokio::spawn(async move {
-                            m.record_first_token_latency(latency_ms).await;
-                        });
-                    }
-                    
-                    chunk_count += 1;
-                    // Send content chunk
-                    let chunk = ChatCompletionChunk {
-                        id: request_id.to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created,
-                        model: model_id.to_string(),
-                        choices: vec![StreamChoice {
-                            index: 0,
-                            delta: DeltaContent {
-                                role: None,
-                                content: Some(content),
-                            },
-                            finish_reason: None,
-                        }],
-                    };
-                    
-                    let data = match serde_json::to_string(&chunk) {
-                        Ok(json) => json,
-                        Err(e) => {
-                            error!("Failed to serialize delta chunk: {}", e);
-                            continue;
-                        }
-                    };
-                    yield Ok(Event::default().data(data));
-                    
-                    // Track chunks sent
-                    let m = metrics.clone();
-                    tokio::spawn(async move {
-                        m.record_chunk_sent().await;
-                    });
-                }
-                Ok(StreamFrame::Done { finish_reason, .. }) => {
-                    // Send final chunk
-                    let chunk = ChatCompletionChunk {
-                        id: request_id.to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created,
-                        model: model_id.to_string(),
-                        choices: vec![StreamChoice {
-                            index: 0,
-                            delta: DeltaContent {
-                                role: None,
-                                content: None,
-                            },
-                            finish_reason: Some(finish_reason),
-                        }],
-                    };
-                    
-                    let data = match serde_json::to_string(&chunk) {
-                        Ok(json) => json,
-                        Err(e) => {
-                            error!("Failed to serialize final chunk: {}", e);
-                            yield Ok(Event::default().data("[DONE]"));
-                            break;
-                        }
-                    };
-                    yield Ok(Event::default().data(data));
-                    
-                    // Send [DONE] marker
-                    yield Ok(Event::default().data("[DONE]"));
-                }
-                Ok(StreamFrame::Error { message }) => {
-                    // Send error as data
-                    let error_data = json!({
-                        "error": {
-                            "message": message,
-                            "type": "runtime_error"
-                        }
-                    });
-                    yield Ok(Event::default().data(error_data.to_string()));
-                    break;
-                }
-                Err(e) => {
-                    // Send error as data
-                    let error_data = json!({
-                        "error": {
-                            "message": e.to_string(),
-                            "type": "stream_error"
-                        }
-                    });
-                    yield Ok(Event::default().data(error_data.to_string()));
-                    break;
-                }
-            }
-        }
-    };
-    
-    Sse::new(response_stream)
-}
+// Old streaming_response removed - using streaming::streaming_response_with_observability
+
+// NOTE: The old streaming_response function has been removed.
+// All streaming is now handled via streaming::streaming_response_with_observability
+// which includes proper request tracking, backpressure, and observability.
 
 async fn version() -> Json<serde_json::Value> {
     Json(json!({
@@ -386,8 +279,8 @@ async fn get_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn get_metrics(State(state): State<AppState>) -> Json<MetricsSnapshot> {
-    Json(state.metrics.get_snapshot().await)
+async fn get_metrics(State(state): State<AppState>) -> Json<ObservableMetricsSnapshot> {
+    Json(state.metrics.snapshot().await)
 }
 
 #[tokio::main]
@@ -425,7 +318,7 @@ async fn main() -> Result<()> {
         registry: Arc::new(registry),
         model_handle: Arc::new(RwLock::new(Some(model_handle))),
         start_time: SystemTime::now(),
-        metrics: Arc::new(Metrics::new()),
+        metrics: Arc::new(ObservableMetrics::new()),
         rate_limiter,
     };
     

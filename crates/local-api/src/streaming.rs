@@ -1,7 +1,7 @@
 use axum::response::sse::{Event, Sse};
 use chatsafe_common::{
     ChatCompletionChunk, StreamChoice, DeltaContent, StreamFrame, Role,
-    Error as CommonError, Metrics,
+    Error as CommonError, ObservableMetrics, RequestId,
 };
 use futures::stream::Stream;
 use futures::StreamExt;
@@ -18,19 +18,20 @@ use crate::rate_limiter::RateLimiter;
 const BUFFER_SIZE: usize = 32;  // Maximum chunks to buffer
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);  // Timeout per chunk
 
-pub fn streaming_response_with_backpressure(
+pub fn streaming_response_with_observability(
     stream: std::pin::Pin<Box<dyn Stream<Item = Result<StreamFrame, CommonError>> + Send>>,
     model_id: String,
-    metrics: Arc<Metrics>,
+    metrics: Arc<ObservableMetrics>,
     rate_limiter: RateLimiter,
     client_ip: IpAddr,
+    request_id: RequestId,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Use bounded channel for backpressure
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(BUFFER_SIZE);
     
     // Spawn producer task with automatic cleanup
     tokio::spawn(async move {
-        produce_stream_events(stream, model_id, metrics, tx, rate_limiter, client_ip).await;
+        produce_stream_events(stream, model_id, metrics, tx, rate_limiter, client_ip, request_id).await;
     });
     
     // Consumer stream that yields from the bounded channel
@@ -46,15 +47,16 @@ pub fn streaming_response_with_backpressure(
 async fn produce_stream_events(
     mut stream: std::pin::Pin<Box<dyn Stream<Item = Result<StreamFrame, CommonError>> + Send>>,
     model_id: String,
-    metrics: Arc<Metrics>,
+    metrics: Arc<ObservableMetrics>,
     tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     rate_limiter: RateLimiter,
     client_ip: IpAddr,
+    request_id: RequestId,
 ) {
     // Ensure cleanup happens when function exits
-    let _cleanup = CleanupGuard::new(rate_limiter.clone(), client_ip);
+    let _cleanup = CleanupGuard::new(rate_limiter.clone(), client_ip, metrics.clone(), request_id.clone());
     
-    let request_id = Arc::new(Uuid::new_v4().to_string());
+    let request_id_str = Arc::new(request_id.to_string());
     let model_id = Arc::new(model_id);
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -73,7 +75,7 @@ async fn produce_stream_events(
             Ok(StreamFrame::Start { role, .. }) => {
                 // Send initial chunk with role
                 let chunk = ChatCompletionChunk {
-                    id: request_id.to_string(),
+                    id: request_id_str.to_string(),
                     object: "chat.completion.chunk".to_string(),
                     created,
                     model: model_id.to_string(),
@@ -110,7 +112,7 @@ async fn produce_stream_events(
                 
                 // Send content chunk
                 let chunk = ChatCompletionChunk {
-                    id: request_id.to_string(),
+                    id: request_id_str.to_string(),
                     object: "chat.completion.chunk".to_string(),
                     created,
                     model: model_id.to_string(),
@@ -127,7 +129,7 @@ async fn produce_stream_events(
                 // Track chunks sent
                 let m = metrics.clone();
                 tokio::spawn(async move {
-                    m.record_chunk_sent().await;
+                    m.record_chunk().await;
                 });
                 
                 match serde_json::to_string(&chunk) {
@@ -141,7 +143,7 @@ async fn produce_stream_events(
             Ok(StreamFrame::Done { finish_reason, .. }) => {
                 // Send final chunk with finish reason
                 let chunk = ChatCompletionChunk {
-                    id: request_id.to_string(),
+                    id: request_id_str.to_string(),
                     object: "chat.completion.chunk".to_string(),
                     created,
                     model: model_id.to_string(),
@@ -204,11 +206,13 @@ async fn produce_stream_events(
 struct CleanupGuard {
     rate_limiter: RateLimiter,
     client_ip: IpAddr,
+    metrics: Arc<ObservableMetrics>,
+    request_id: RequestId,
 }
 
 impl CleanupGuard {
-    fn new(rate_limiter: RateLimiter, client_ip: IpAddr) -> Self {
-        Self { rate_limiter, client_ip }
+    fn new(rate_limiter: RateLimiter, client_ip: IpAddr, metrics: Arc<ObservableMetrics>, request_id: RequestId) -> Self {
+        Self { rate_limiter, client_ip, metrics, request_id }
     }
 }
 
@@ -216,8 +220,12 @@ impl Drop for CleanupGuard {
     fn drop(&mut self) {
         let limiter = self.rate_limiter.clone();
         let ip = self.client_ip;
+        let metrics = self.metrics.clone();
+        let req_id = self.request_id.clone();
+        
         tokio::spawn(async move {
             limiter.release_request(ip).await;
+            metrics.complete_request(&req_id).await;
         });
     }
 }

@@ -4,6 +4,27 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 
 ## Changelog
 
+### 2025-10-01: Milestone 2 - Observability & Tracing Complete
+- ✅ Implemented Request IDs with correlation across API and runtime
+- ✅ Enhanced metrics with p50/p95/p99 percentiles for latencies
+- ✅ Added detailed error taxonomy (BadRequest/Timeout/Cancelled/Unavailable/Internal)
+- ✅ Implemented ObservableMetrics with comprehensive tracking:
+  - First-token latency percentiles  
+  - Request duration percentiles
+  - Active streams tracking
+  - Cancellation and timeout counters
+  - Rate limit hit tracking per IP
+  - Error categorization with actionable messages
+- ✅ All responses include Request-ID for tracing
+- ✅ /metrics endpoint exposes detailed observability data
+- ✅ Privacy preserved - no PII, payloads, or egress
+- ✅ All 51 unit tests passing
+Features:
+- Request tracing from entry to completion
+- Automatic cleanup on disconnect/cancellation
+- Error messages are categorized and actionable
+- Metrics include tokens/sec, active streams, error breakdown
+
 ### 2025-10-01: Milestone 1 - Production Hardening Complete
 - ✅ Implemented rate limiting with token bucket algorithm (per-IP and global)
 - ✅ Added backpressure control with bounded buffers (32 chunk limit) for SSE streaming
