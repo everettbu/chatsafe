@@ -451,11 +451,26 @@ impl Runtime for LlamaAdapter {
                                                         accumulated.push_str(&chunk.content);
                                                         token_count += 1;
                                                         
-                                                        // Send content immediately without buffering
-                                                        // Don't clean individual tokens - they may be partial
-                                                        yield Ok(StreamFrame::Delta {
-                                                            content: chunk.content,
-                                                        });
+                                                        // Check if we've accumulated potential role pollution
+                                                        // If so, replace the entire response
+                                                        if accumulated.contains("AI:") && accumulated.contains("You:") {
+                                                            // This is role pollution, send replacement message once
+                                                            if !accumulated.contains("I understand you'd like me to respond") {
+                                                                let replacement = "I understand you'd like me to respond, but I should avoid role-playing conversations. How can I help you directly?";
+                                                                // Clear accumulated and replace with our message
+                                                                accumulated = replacement.to_string();
+                                                                yield Ok(StreamFrame::Delta {
+                                                                    content: replacement.to_string(),
+                                                                });
+                                                                // Force stop
+                                                                break;
+                                                            }
+                                                        } else {
+                                                            // Normal content, send as-is
+                                                            yield Ok(StreamFrame::Delta {
+                                                                content: chunk.content,
+                                                            });
+                                                        }
                                                     }
                                                     
                                                     if chunk.stop {

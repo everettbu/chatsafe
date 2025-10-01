@@ -4,6 +4,35 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 
 ## Changelog
 
+### 2025-10-01: Security Analysis & Documentation
+- ✅ Investigated command injection protection - inherently safe via `Command::arg()`
+- ✅ No shell interpreter used anywhere in codebase
+- ✅ Created comprehensive security documentation (docs/security.md)
+- 📝 Protection is architectural, not accidental
+Issues discovered:
+- Command injection not actually a vulnerability (good news!)
+- Protection comes from proper use of Rust's process APIs
+
+### 2025-10-01: Role Pollution Mitigation
+- ✅ Implemented role pollution detection and prevention
+- ✅ Model no longer outputs "AI:" and "You:" markers in responses
+- ⚠️ Fix broke 7 unit tests that expect different cleaning behavior
+- 📝 Integration tests still passing
+Issues discovered:
+- Unit tests need updating to match new cleaning behavior
+- Template engine tests failing due to changed response format
+
+### 2025-09-30: Test Suite Execution Results
+- ✅ All security tests passing (12/12) - No command injection vulnerabilities found!
+- ✅ All integration tests passing (15/15)
+- ✅ All golden tests passing (5/5)
+- ⚠️ Role pollution test has 1 failure (role markers in output)
+- ⚠️ Unit tests: 30/31 passing (streaming stop detection failing)
+- 📝 Fixed unit test compilation errors
+Issues discovered:
+- Role pollution still occurs in some responses ("AI:" and "You:" markers)
+- One unit test consistently failing (test_streaming_stop_detection)
+
 ### 2025-09-30: Test Organization & Security Tests
 - ✅ Organized all tests into `tests/` directory
 - ✅ Created comprehensive security test suite (command injection, path traversal)
@@ -44,9 +73,10 @@ Issues addressed:
 ## Open Issues
 
 ### High Priority
-- **Unit Test Failure**: `test_streaming_stop_detection` failing (1/17)
+- **Role Pollution Bug** (Partially Fixed ✅): Detection works but unit tests need updating
+- **Unit Test Failures**: 7 tests failing after role pollution fix
 - **No Rate Limiting**: Vulnerable to DoS attacks
-- **Command Injection Risk**: Model paths passed directly to shell (llama_adapter.rs:88)
+- **Command Injection Risk** (Not a risk ✅): Protected by `Command::arg()` API - no shell involved
 
 ### Medium Priority
 - **Incomplete Process Reaping**: Stdout/stderr not drained, no wait() after kill

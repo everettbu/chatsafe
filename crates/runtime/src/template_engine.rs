@@ -101,6 +101,13 @@ impl TemplateEngine {
     
     /// Remove role pollution from response
     fn remove_role_pollution(text: &str) -> String {
+        // If the entire response looks like role-play output, reject it
+        if text.contains("AI:") && text.contains("You:") {
+            // This appears to be the model outputting a dialogue
+            // Return a generic response instead
+            return "I understand you'd like me to respond, but I should avoid role-playing conversations. How can I help you directly?".to_string();
+        }
+        
         let role_patterns = vec![
             "AI:", "You:", "User:", "Assistant:", "System:",
             "Human:", "Bot:", "### Instruction:", "### Response:",
@@ -115,18 +122,46 @@ impl TemplateEngine {
             // Check if line starts with any role pattern
             for pattern in &role_patterns {
                 if line.trim_start().starts_with(pattern) {
-                    clean_line = line.trim_start()
+                    // If this is the ONLY content on the line after the role marker,
+                    // it might be the model trying to output a dialogue
+                    let remainder = line.trim_start()
                         .trim_start_matches(pattern)
-                        .trim_start()
-                        .to_string();
+                        .trim();
+                    
+                    // If there's actual content after the role marker, keep it
+                    if !remainder.is_empty() {
+                        clean_line = remainder.to_string();
+                    } else {
+                        // Empty after role marker, skip this line
+                        continue;
+                    }
                     break;
                 }
             }
             
-            cleaned_lines.push(clean_line);
+            // Also check for role markers mid-line (less aggressive)
+            for pattern in &role_patterns {
+                if clean_line.contains(pattern) && !clean_line.starts_with(pattern) {
+                    // Only remove if it looks like an obvious role marker
+                    // (e.g., at the start of a sentence)
+                    clean_line = clean_line.replace(&format!("\n{}", pattern), "\n");
+                    clean_line = clean_line.replace(&format!(". {}", pattern), ". ");
+                }
+            }
+            
+            if !clean_line.is_empty() {
+                cleaned_lines.push(clean_line);
+            }
         }
         
-        cleaned_lines.join("\n")
+        let result = cleaned_lines.join("\n").trim().to_string();
+        
+        // If we've removed everything, return a safe response
+        if result.is_empty() {
+            return "I'm here to help. What would you like to know?".to_string();
+        }
+        
+        result
     }
     
     /// Check if text contains stop sequence
@@ -306,14 +341,22 @@ mod tests {
     
     #[test]
     fn test_remove_role_pollution() {
+        // Test with both AI: and You: triggers replacement
         let text = "AI: This is a response\nNormal line\nYou: Should be removed\nAnother line";
         let cleaned = TemplateEngine::remove_role_pollution(text);
         
-        assert!(cleaned.contains("This is a response"));
-        assert!(cleaned.contains("Normal line"));
-        assert!(cleaned.contains("Should be removed"));
+        // When both AI: and You: are present, it returns replacement message
+        assert!(cleaned.contains("I understand you'd like me to respond"));
         assert!(!cleaned.contains("AI:"));
         assert!(!cleaned.contains("You:"));
+        
+        // Test with only one role marker - should clean but not replace
+        let text_single = "AI: This is a response\nNormal line\nAnother line";
+        let cleaned_single = TemplateEngine::remove_role_pollution(text_single);
+        
+        assert!(cleaned_single.contains("This is a response"));
+        assert!(cleaned_single.contains("Normal line"));
+        assert!(!cleaned_single.contains("AI:"));
     }
     
     #[test]

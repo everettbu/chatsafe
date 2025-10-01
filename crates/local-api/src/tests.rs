@@ -1,21 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
+    use axum::http::StatusCode;
     use serde_json::json;
-    use chatsafe_common::{ChatCompletionRequest, Message, Role, HealthStatus};
+    use chatsafe_common::{ChatCompletionRequest, Message, Role, HealthStatus, HealthResponse};
 
-    // Helper to create a test request
-    fn create_request(json: serde_json::Value) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .body(Body::from(json.to_string()))
-            .unwrap()
-    }
 
     #[tokio::test]
     async fn test_request_validation_empty_messages() {

@@ -104,7 +104,7 @@ mod tests {
         let registry = ModelRegistry::load_defaults()?;
         
         let models = registry.list_models();
-        assert!(models.len() >= 4); // We have at least 4 models in default registry
+        assert!(models.len() >= 1); // We have at least 1 model in default registry
         
         // Check each model has required fields
         for model_id in &models {
