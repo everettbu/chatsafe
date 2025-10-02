@@ -191,8 +191,9 @@ impl LlamaAdapter {
     }
     
     /// Process SSE chunk and extract content
-    fn parse_sse_chunk(data: &str) -> Option<StreamChunk> {
-        serde_json::from_str::<StreamChunk>(data).ok()
+    fn parse_sse_chunk(data: &str) -> Result<StreamChunk> {
+        serde_json::from_str::<StreamChunk>(data)
+            .map_err(|e| Error::RuntimeError(format!("Failed to parse SSE chunk: {}. Data: {:?}", e, data)))
     }
     
     /// Clean streaming content by removing markers
@@ -548,6 +549,7 @@ impl LlamaAdapter {
         let mut buffer = Vec::new();
         let mut accumulated = String::new();
         let mut token_count = 0;
+        let mut dropped_frames = 0;
         
         while let Some(chunk_result) = bytes_stream.next().await {
             let bytes = chunk_result
@@ -563,8 +565,9 @@ impl LlamaAdapter {
                 // Parse SSE event
                 for line in event.lines() {
                     if let Some(data) = line.strip_prefix("data: ") {
-                        if let Some(chunk) = Self::parse_sse_chunk(data) {
-                            if !chunk.content.is_empty() {
+                        match Self::parse_sse_chunk(data) {
+                            Ok(chunk) => {
+                                if !chunk.content.is_empty() {
                                 accumulated.push_str(&chunk.content);
                                 token_count += 1;
                                 
@@ -585,29 +588,40 @@ impl LlamaAdapter {
                                         });
                                     }
                                 }
-                            }
-                            
-                            if chunk.stop {
-                                // Final cleanup
-                                let final_cleaned = TemplateEngine::clean_response(
-                                    &accumulated,
-                                    &template,
-                                    &stop_sequences,
-                                    &eos_token,
-                                );
-                                
-                                if final_cleaned.stopped_at.is_some() {
-                                    frames.push(StreamFrame::Delta {
-                                        content: "\n".to_string(),
-                                    });
                                 }
                                 
-                                break;
+                                if chunk.stop {
+                                    // Final cleanup
+                                    let final_cleaned = TemplateEngine::clean_response(
+                                        &accumulated,
+                                        &template,
+                                        &stop_sequences,
+                                        &eos_token,
+                                    );
+                                    
+                                    if final_cleaned.stopped_at.is_some() {
+                                        frames.push(StreamFrame::Delta {
+                                            content: "\n".to_string(),
+                                        });
+                                    }
+                                    
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                // Log the malformed frame but continue processing
+                                warn!("Dropped malformed SSE frame: {}", e);
+                                dropped_frames += 1;
                             }
                         }
                     }
                 }
             }
+        }
+        
+        // Log warning if any frames were dropped
+        if dropped_frames > 0 {
+            warn!("Dropped {} malformed SSE frames during streaming", dropped_frames);
         }
         
         // Send done frame with usage stats

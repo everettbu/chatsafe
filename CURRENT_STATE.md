@@ -4,18 +4,22 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 
 ## Changelog
 
-### 2025-10-02: Code Quality Improvements Complete
+### 2025-10-02: Code Quality & Observability Improvements
 - ✅ Fixed all 15+ clippy warnings - now 0 warnings
 - ✅ Replaced manual range checks with idiomatic contains()
 - ✅ Removed unused imports and dead code
 - ✅ Fixed ToString implementation to use Display trait
 - ✅ Refactored functions with too many arguments using structs
 - ✅ Optimized string operations for better performance
+- ✅ Removed unused crates (infer-runtime, store) from workspace
+- ✅ Fixed silent SSE frame drops - now logs warnings and tracks metrics
 - ✅ All 53 unit tests still passing
 Features improved:
 - Created StreamParams and FrameContext structs to reduce function arguments
 - Removed unused client field from LlamaAdapter
 - Fixed all remaining code quality issues identified by clippy
+- Archived unused crates with documentation for future reference
+- Added error logging for malformed SSE frames with metrics tracking
 - Code is now fully compliant with Rust best practices
 
 ### 2025-10-01: Milestone 2 - Observability & Tracing Complete
@@ -166,17 +170,17 @@ Issues addressed:
 
 ### Medium Priority
 - **No Request Tracing**: Can't correlate individual requests
-- **Code Quality Warnings** (Fixed ✅): All clippy warnings resolved
 
 ### Low Priority
 - **No Heartbeat**: Long requests timeout on proxies
-- **Silent Frame Drops**: Malformed SSE frames ignored
 - **No Reconnection**: Connection drops require full restart
-- **Unused Crates**: infer-runtime and store crates have no implementation
 
 ## Recently Fixed
 
 ### 2025-10-01
+- ✅ **Code Quality Warnings** (Fixed ✅): All clippy warnings resolved
+- ✅ **Unused Crates** (Fixed ✅): Removed from workspace and archived
+- ✅ **Silent Frame Drops** (Fixed ✅): Now logs warnings and tracks metrics
 - ✅ **No Rate Limiting** (Fixed ✅): Implemented token bucket rate limiting per-IP and global
 - ✅ **Incomplete Process Reaping** (Fixed ✅): Added ProcessManager with proper stdout/stderr draining
 - ✅ **Health Check Timeout Missing** (Fixed ✅): Added 2-second timeout for health checks

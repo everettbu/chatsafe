@@ -145,6 +145,9 @@ struct MetricsData {
     active_streams: u64,
     completed_streams: u64,
     failed_streams: u64,
+    
+    // Frame processing metrics
+    dropped_frames: u64,
 }
 
 impl Default for ObservableMetrics {
@@ -177,6 +180,7 @@ impl ObservableMetrics {
                 active_streams: 0,
                 completed_streams: 0,
                 failed_streams: 0,
+                dropped_frames: 0,
             })),
             start_time: Instant::now(),
         }
@@ -295,6 +299,12 @@ impl ObservableMetrics {
         data.total_chunks_sent += 1;
     }
     
+    /// Record dropped frames
+    pub async fn record_dropped_frames(&self, count: u64) {
+        let mut data = self.inner.write().await;
+        data.dropped_frames += count;
+    }
+    
     /// Calculate percentile from samples
     fn calculate_percentile(samples: &[u64], percentile: f64) -> u64 {
         if samples.is_empty() {
@@ -363,6 +373,7 @@ impl ObservableMetrics {
             active_streams: data.active_streams,
             completed_streams: data.completed_streams,
             failed_streams: data.failed_streams,
+            dropped_frames: data.dropped_frames,
             
             // Error metrics
             errors_by_category: data.errors_by_category.clone(),
@@ -423,6 +434,7 @@ pub struct MetricsSnapshot {
     pub active_streams: u64,
     pub completed_streams: u64,
     pub failed_streams: u64,
+    pub dropped_frames: u64,
     
     // Error metrics by category
     pub errors_by_category: HashMap<ErrorCategory, u64>,
