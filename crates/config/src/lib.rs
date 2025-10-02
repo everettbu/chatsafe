@@ -1,12 +1,10 @@
-mod model_registry;
 mod config_loader;
+mod model_registry;
 
 #[cfg(test)]
 mod tests;
 
+pub use config_loader::{AppConfig, ConfigLoader, ModelsConfig, RuntimeConfig, ServerConfig};
 pub use model_registry::{
-    ModelRegistry, ModelConfig, ModelDefaults, ModelResources,
-    TemplateConfig, ModelRegistryData
+    ModelConfig, ModelDefaults, ModelRegistry, ModelRegistryData, ModelResources, TemplateConfig,
 };
-pub use config_loader::{ConfigLoader, AppConfig, ServerConfig, RuntimeConfig, ModelsConfig};
-

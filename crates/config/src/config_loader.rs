@@ -1,6 +1,6 @@
+use chatsafe_common::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use chatsafe_common::Result;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +71,7 @@ impl ConfigLoader {
                 return Ok(config);
             }
         }
-        
+
         // Check default locations
         let default_paths = vec![
             PathBuf::from("chatsafe.json"),
@@ -79,7 +79,7 @@ impl ConfigLoader {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("chatsafe/config.json"),
         ];
-        
+
         for path in default_paths {
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
@@ -87,11 +87,11 @@ impl ConfigLoader {
                 return Ok(config);
             }
         }
-        
+
         // Use defaults
         Ok(AppConfig::default())
     }
-    
+
     /// Save configuration to file
     pub fn save(config: &AppConfig, path: &PathBuf) -> Result<()> {
         let content = serde_json::to_string_pretty(config)?;

@@ -7,6 +7,8 @@ pub mod observability;
 mod tests;
 
 pub use dto::*;
-pub use error::{Error, Result, ErrorResponse};
+pub use error::{Error, ErrorResponse, Result};
 pub use metrics::{Metrics, MetricsSnapshot};
-pub use observability::{ObservableMetrics, RequestId, ErrorCategory, MetricsSnapshot as ObservableMetricsSnapshot};
+pub use observability::{
+    ErrorCategory, MetricsSnapshot as ObservableMetricsSnapshot, ObservableMetrics, RequestId,
+};

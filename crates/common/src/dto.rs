@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 
 // Constants for validation
 const MAX_TOKENS_LIMIT: usize = 4096;
@@ -52,7 +52,9 @@ impl Message {
             return Err(Error::BadRequest("Message content cannot be empty".into()));
         }
         if self.content.len() > 100_000 {
-            return Err(Error::BadRequest("Message content too long (max 100k chars)".into()));
+            return Err(Error::BadRequest(
+                "Message content too long (max 100k chars)".into(),
+            ));
         }
         Ok(())
     }
@@ -78,52 +80,57 @@ impl ChatCompletionRequest {
         if self.messages.is_empty() {
             return Err(Error::BadRequest("Messages array cannot be empty".into()));
         }
-        
+
         for msg in &self.messages {
             msg.validate()?;
         }
-        
+
         // Validate temperature
         if let Some(temp) = self.temperature {
             if !(TEMPERATURE_MIN..=TEMPERATURE_MAX).contains(&temp) {
-                return Err(Error::BadRequest(
-                    format!("Temperature must be between {} and {}", TEMPERATURE_MIN, TEMPERATURE_MAX)
-                ));
+                return Err(Error::BadRequest(format!(
+                    "Temperature must be between {} and {}",
+                    TEMPERATURE_MIN, TEMPERATURE_MAX
+                )));
             }
         }
-        
+
         // Validate max_tokens
         if let Some(max_tokens) = self.max_tokens {
             if !(MIN_TOKENS..=MAX_TOKENS_LIMIT).contains(&max_tokens) {
-                return Err(Error::BadRequest(
-                    format!("max_tokens must be between {} and {}", MIN_TOKENS, MAX_TOKENS_LIMIT)
-                ));
+                return Err(Error::BadRequest(format!(
+                    "max_tokens must be between {} and {}",
+                    MIN_TOKENS, MAX_TOKENS_LIMIT
+                )));
             }
         }
-        
+
         // Validate top_p
         if let Some(top_p) = self.top_p {
             if !(TOP_P_MIN..=TOP_P_MAX).contains(&top_p) {
-                return Err(Error::BadRequest(
-                    format!("top_p must be between {} and {}", TOP_P_MIN, TOP_P_MAX)
-                ));
+                return Err(Error::BadRequest(format!(
+                    "top_p must be between {} and {}",
+                    TOP_P_MIN, TOP_P_MAX
+                )));
             }
         }
-        
+
         // Validate top_k
         if let Some(top_k) = self.top_k {
             if top_k < 1 {
                 return Err(Error::BadRequest("top_k must be at least 1".into()));
             }
         }
-        
+
         // Validate repeat_penalty
         if let Some(penalty) = self.repeat_penalty {
             if !(0.1..=2.0).contains(&penalty) {
-                return Err(Error::BadRequest("repeat_penalty must be between 0.1 and 2.0".into()));
+                return Err(Error::BadRequest(
+                    "repeat_penalty must be between 0.1 and 2.0".into(),
+                ));
             }
         }
-        
+
         Ok(())
     }
 }
@@ -177,18 +184,14 @@ pub enum StreamFrame {
         role: Role,
     },
     /// Delta content chunk
-    Delta {
-        content: String,
-    },
+    Delta { content: String },
     /// End of stream with usage stats
     Done {
         finish_reason: FinishReason,
         usage: Usage,
     },
     /// Error during streaming
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// Streaming chunk for OpenAI compatibility

@@ -13,8 +13,15 @@ const TEMPLATE_MARKERS: &[&str] = &[
 
 // Constants for role patterns
 const ROLE_PATTERNS: &[&str] = &[
-    "AI:", "You:", "User:", "Assistant:", "System:",
-    "Human:", "Bot:", "### Instruction:", "### Response:",
+    "AI:",
+    "You:",
+    "User:",
+    "Assistant:",
+    "System:",
+    "Human:",
+    "Bot:",
+    "### Instruction:",
+    "### Response:",
 ];
 
 // Fallback messages
@@ -26,13 +33,10 @@ pub struct TemplateEngine;
 
 impl TemplateEngine {
     /// Format messages into a prompt using the model template
-    pub fn format_prompt(
-        messages: &[Message],
-        template: &TemplateConfig,
-    ) -> String {
+    pub fn format_prompt(messages: &[Message], template: &TemplateConfig) -> String {
         let mut prompt = String::with_capacity(1024); // Pre-allocate reasonable size
         let mut has_system = false;
-        
+
         for message in messages {
             match message.role {
                 Role::System => {
@@ -55,7 +59,7 @@ impl TemplateEngine {
                             &template.system_suffix,
                         );
                     }
-                    
+
                     Self::write_message(
                         &mut prompt,
                         &template.user_prefix,
@@ -73,13 +77,13 @@ impl TemplateEngine {
                 }
             }
         }
-        
+
         // Add assistant prefix to signal model to respond
         prompt.push_str(&template.assistant_prefix);
-        
+
         prompt
     }
-    
+
     /// Helper to write a message with prefix and suffix
     fn write_message(prompt: &mut String, prefix: &str, content: &str, suffix: &str) {
         // Pre-calculate capacity for better performance
@@ -88,7 +92,7 @@ impl TemplateEngine {
         prompt.push_str(content);
         prompt.push_str(suffix);
     }
-    
+
     /// Clean response by removing template markers and role pollution
     pub fn clean_response(
         response: &str,
@@ -97,28 +101,28 @@ impl TemplateEngine {
         eos_token: &str,
     ) -> CleanedResponse {
         let mut cleaned = response.to_string();
-        
+
         // First, detect and truncate at stop sequences
         let stopped_at = Self::truncate_at_stop_sequence(&mut cleaned, stop_sequences, eos_token);
-        
+
         // Remove template prefixes/suffixes if they were echoed by the model
         Self::remove_template_echoes(&mut cleaned, template);
-        
+
         // Remove any leaked template markers
         Self::remove_template_markers(&mut cleaned);
-        
+
         // Remove role pollution
         cleaned = Self::remove_role_pollution(&cleaned);
-        
+
         // Final trim
         cleaned = cleaned.trim().to_string();
-        
+
         CleanedResponse {
             content: cleaned,
             stopped_at,
         }
     }
-    
+
     /// Truncate text at the first stop sequence found
     fn truncate_at_stop_sequence(
         text: &mut String,
@@ -139,7 +143,7 @@ impl TemplateEngine {
         }
         None
     }
-    
+
     /// Remove template prefixes/suffixes if echoed by model
     fn remove_template_echoes(text: &mut String, template: &TemplateConfig) {
         // This happens when the model includes its own role markers in the output
@@ -152,7 +156,7 @@ impl TemplateEngine {
             text.truncate(new_len);
         }
     }
-    
+
     /// Remove leaked template markers
     fn remove_template_markers(text: &mut String) {
         // Only do replacement if markers are actually present (optimization)
@@ -162,17 +166,17 @@ impl TemplateEngine {
             }
         }
     }
-    
+
     /// Remove role pollution from response
     fn remove_role_pollution(text: &str) -> String {
         // Quick check for dialogue pattern
         if Self::has_dialogue_pattern(text) {
             return ROLE_POLLUTION_FALLBACK.to_string();
         }
-        
+
         let lines: Vec<&str> = text.lines().collect();
         let mut cleaned_lines = Vec::with_capacity(lines.len());
-        
+
         for line in lines {
             if let Some(cleaned) = Self::clean_role_from_line(line) {
                 if !cleaned.is_empty() {
@@ -180,9 +184,9 @@ impl TemplateEngine {
                 }
             }
         }
-        
+
         let result = cleaned_lines.join("\n").trim().to_string();
-        
+
         // If we've removed everything, return a safe response
         if result.is_empty() {
             EMPTY_RESPONSE_FALLBACK.to_string()
@@ -190,23 +194,21 @@ impl TemplateEngine {
             result
         }
     }
-    
+
     /// Check if text contains dialogue pattern
     fn has_dialogue_pattern(text: &str) -> bool {
         text.contains("AI:") && text.contains("You:")
     }
-    
+
     /// Clean role markers from a single line
     fn clean_role_from_line(line: &str) -> Option<String> {
         let trimmed = line.trim_start();
-        
+
         // Check if line starts with any role pattern
         for pattern in ROLE_PATTERNS {
             if trimmed.starts_with(pattern) {
-                let remainder = trimmed
-                    .trim_start_matches(pattern)
-                    .trim();
-                
+                let remainder = trimmed.trim_start_matches(pattern).trim();
+
                 // If there's actual content after the role marker, return it
                 if !remainder.is_empty() {
                     return Some(remainder.to_string());
@@ -216,7 +218,7 @@ impl TemplateEngine {
                 }
             }
         }
-        
+
         // Line doesn't start with role pattern, check for mid-line markers
         let mut cleaned = line.to_string();
         for pattern in ROLE_PATTERNS {
@@ -226,26 +228,29 @@ impl TemplateEngine {
                 cleaned = cleaned.replace(&format!(". {}", pattern), ". ");
             }
         }
-        
+
         Some(cleaned)
     }
-    
+
     /// Check if text contains stop sequence
     pub fn contains_stop_sequence(
         text: &str,
         stop_sequences: &[String],
         eos_token: &str,
     ) -> Option<String> {
-        for stop_seq in stop_sequences.iter().chain(std::iter::once(&eos_token.to_string())) {
+        for stop_seq in stop_sequences
+            .iter()
+            .chain(std::iter::once(&eos_token.to_string()))
+        {
             if text.contains(stop_seq) {
                 return Some(stop_seq.clone());
             }
         }
         None
     }
-    
+
     /// Process streaming chunk
-    /// 
+    ///
     /// The buffer maintains ALL accumulated content until a stop sequence is found.
     /// Partial emissions are just for incremental display - the buffer keeps everything.
     pub fn process_stream_chunk(
@@ -258,7 +263,7 @@ impl TemplateEngine {
         // Add new chunk to accumulated buffer
         let start_len = buffer.len();
         buffer.push_str(chunk);
-        
+
         // Check for stop sequences in entire buffer
         if let Some(stop_seq) = Self::contains_stop_sequence(buffer, stop_sequences, eos_token) {
             // Found stop sequence - clean and finalize the ENTIRE accumulated response
@@ -270,16 +275,14 @@ impl TemplateEngine {
             buffer.clear();
             return result;
         }
-        
+
         // No stop sequence yet - emit only the new content if it's safe
         let new_content = &buffer[start_len..];
-        
+
         // For simplicity in streaming, just emit the new content after basic cleaning
         if !new_content.is_empty() {
             let cleaned = Self::remove_role_pollution(new_content);
-            StreamChunkResult::Partial {
-                content: cleaned,
-            }
+            StreamChunkResult::Partial { content: cleaned }
         } else {
             StreamChunkResult::Buffering
         }
@@ -299,7 +302,10 @@ pub enum StreamChunkResult {
     /// Partial content that can be emitted
     Partial { content: String },
     /// Complete response detected
-    Complete { content: String, stopped_at: Option<String> },
+    Complete {
+        content: String,
+        stopped_at: Option<String>,
+    },
     /// Still buffering, not ready to emit
     Buffering,
 }
@@ -307,7 +313,7 @@ pub enum StreamChunkResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn test_template() -> TemplateConfig {
         TemplateConfig {
             id: "test".to_string(),
@@ -321,7 +327,7 @@ mod tests {
             default_system_prompt: "You are helpful.".to_string(),
         }
     }
-    
+
     #[test]
     fn test_format_prompt() {
         let template = test_template();
@@ -335,60 +341,56 @@ mod tests {
                 content: "Hello".to_string(),
             },
         ];
-        
+
         let prompt = TemplateEngine::format_prompt(&messages, &template);
-        
+
         assert!(prompt.contains("<|system|>Be concise.</|system|>"));
         assert!(prompt.contains("<|user|>Hello</|user|>"));
         assert!(prompt.ends_with("<|assistant|>"));
     }
-    
+
     #[test]
     fn test_clean_response() {
         let template = test_template();
         let stop_sequences = vec!["<|stop|>".to_string()];
         let eos_token = "<|eos|>";
-        
+
         // Test stop sequence detection
         let response = "Hello world<|stop|>Extra content";
-        let cleaned = TemplateEngine::clean_response(
-            response,
-            &template,
-            &stop_sequences,
-            eos_token,
-        );
-        
+        let cleaned =
+            TemplateEngine::clean_response(response, &template, &stop_sequences, eos_token);
+
         assert_eq!(cleaned.content, "Hello world");
         assert_eq!(cleaned.stopped_at, Some("<|stop|>".to_string()));
     }
-    
+
     #[test]
     fn test_remove_role_pollution() {
         // Test with both AI: and You: triggers replacement
         let text = "AI: This is a response\nNormal line\nYou: Should be removed\nAnother line";
         let cleaned = TemplateEngine::remove_role_pollution(text);
-        
+
         // When both AI: and You: are present, it returns replacement message
         assert!(cleaned.contains("I understand you'd like me to respond"));
         assert!(!cleaned.contains("AI:"));
         assert!(!cleaned.contains("You:"));
-        
+
         // Test with only one role marker - should clean but not replace
         let text_single = "AI: This is a response\nNormal line\nAnother line";
         let cleaned_single = TemplateEngine::remove_role_pollution(text_single);
-        
+
         assert!(cleaned_single.contains("This is a response"));
         assert!(cleaned_single.contains("Normal line"));
         assert!(!cleaned_single.contains("AI:"));
     }
-    
+
     #[test]
     fn test_stream_chunk_processing() {
         let template = test_template();
         let stop_sequences = vec!["STOP".to_string()];
         let eos_token = "EOS";
         let mut buffer = String::new();
-        
+
         // Test partial chunk
         let result = TemplateEngine::process_stream_chunk(
             "Hello ",
@@ -397,7 +399,7 @@ mod tests {
             eos_token,
             &mut buffer,
         );
-        
+
         match result {
             StreamChunkResult::Partial { content } => {
                 // remove_role_pollution trims the content
@@ -405,7 +407,7 @@ mod tests {
             }
             _ => panic!("Expected partial result"),
         }
-        
+
         // Test stop sequence detection
         buffer.clear();
         let result = TemplateEngine::process_stream_chunk(
@@ -415,9 +417,12 @@ mod tests {
             eos_token,
             &mut buffer,
         );
-        
+
         match result {
-            StreamChunkResult::Complete { content, stopped_at } => {
+            StreamChunkResult::Complete {
+                content,
+                stopped_at,
+            } => {
                 assert_eq!(content, "Hello");
                 assert_eq!(stopped_at, Some("STOP".to_string()));
             }

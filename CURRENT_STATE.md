@@ -4,6 +4,12 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 
 ## Changelog
 
+### 2025-10-03: Rate Limiter Guard & Streaming Fixes
+- ✅ Added `RateLimitGuard` to ensure per-IP slots are released on every early return in `chat_completion`.
+- ✅ Streaming fallback in `LlamaAdapter` now emits the safety message only once and ignores further polluted tokens.
+- ⚠️ README instructs creating a TOML `config.toml`, but `ConfigLoader` only reads JSON (`chatsafe.json`, `config.json`). Documentation and loader must be aligned.
+- ✅ `cargo test --all`
+
 ### 2025-10-02: Code Quality & Observability Improvements
 - ✅ Fixed all 15+ clippy warnings - now 0 warnings
 - ✅ Replaced manual range checks with idiomatic contains()
@@ -174,6 +180,7 @@ Issues addressed:
 ### Low Priority
 - **No Heartbeat**: Long requests timeout on proxies
 - **No Reconnection**: Connection drops require full restart
+- **Config Format Mismatch**: README recommends TOML `config.toml`, but loader only reads JSON; docs and loader need alignment.
 
 ## Recently Fixed
 

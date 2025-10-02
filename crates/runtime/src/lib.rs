@@ -1,6 +1,6 @@
-mod runtime;
 mod llama_adapter;
 mod process_manager;
+mod runtime;
 pub mod template_engine;
 
 #[cfg(test)]
@@ -9,12 +9,12 @@ mod pollution_tests;
 #[cfg(test)]
 mod tests;
 
-pub use runtime::{ModelRuntime, RuntimeHandle};
 pub use llama_adapter::LlamaAdapter;
-pub use template_engine::{TemplateEngine, CleanedResponse, StreamChunkResult};
+pub use runtime::{ModelRuntime, RuntimeHandle};
+pub use template_engine::{CleanedResponse, StreamChunkResult, TemplateEngine};
 
 use async_trait::async_trait;
-use chatsafe_common::{Message, GenerationParams, Result, StreamFrame};
+use chatsafe_common::{GenerationParams, Message, Result, StreamFrame};
 use futures::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -42,10 +42,10 @@ pub struct RuntimeHealth {
 pub trait Runtime: Send + Sync {
     /// Load a model and return a handle
     async fn load(&mut self, model_id: &str) -> Result<ModelHandle>;
-    
+
     /// Get current loaded model handle
     async fn get_handle(&self) -> Option<ModelHandle>;
-    
+
     /// Generate completion with streaming
     async fn generate(
         &self,
@@ -53,16 +53,16 @@ pub trait Runtime: Send + Sync {
         messages: Vec<Message>,
         params: GenerationParams,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamFrame>> + Send>>>;
-    
+
     /// Cancel a generation request
     async fn cancel(&self, request_id: &str) -> Result<()>;
-    
+
     /// Get runtime health status
     async fn health(&self) -> Result<RuntimeHealth>;
-    
+
     /// Unload current model
     async fn unload(&mut self) -> Result<()>;
-    
+
     /// Shutdown runtime completely
     async fn shutdown(&mut self) -> Result<()>;
 }
@@ -78,10 +78,10 @@ pub trait RuntimeExt: Runtime {
         params: GenerationParams,
     ) -> Result<String> {
         use futures::StreamExt;
-        
+
         let mut stream = self.generate(handle, messages, params).await?;
         let mut content = String::new();
-        
+
         while let Some(frame) = stream.next().await {
             match frame? {
                 StreamFrame::Delta { content: delta } => {
@@ -93,7 +93,7 @@ pub trait RuntimeExt: Runtime {
                 _ => {}
             }
         }
-        
+
         Ok(content)
     }
 }

@@ -1,5 +1,5 @@
-use thiserror::Error;
 use serde::Serialize;
+use thiserror::Error;
 
 /// Common error type for ChatSafe with clear taxonomy
 #[derive(Error, Debug)]
@@ -7,56 +7,56 @@ pub enum Error {
     /// Client request errors (4xx)
     #[error("Bad request: {0}")]
     BadRequest(String),
-    
+
     #[error("Model not found: {0}")]
     ModelNotFound(String),
-    
+
     #[error("Invalid model: {0}")]
     InvalidModel(String),
-    
+
     #[error("Request validation failed: {0}")]
     ValidationFailed(String),
-    
+
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
-    
+
     /// Service availability errors (5xx)
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
-    
+
     #[error("Model loading failed: {0}")]
     ModelLoadFailed(String),
-    
+
     #[error("Runtime not ready")]
     RuntimeNotReady,
-    
+
     /// Timeout and cancellation errors
     #[error("Request timeout after {0} seconds")]
     Timeout(u64),
-    
+
     #[error("Request cancelled: {0}")]
     Cancelled(String),
-    
+
     #[error("Generation cancelled by user")]
     UserCancelled,
-    
+
     /// Internal errors
     #[error("Internal error: {0}")]
     Internal(String),
-    
+
     #[error("Runtime error: {0}")]
     RuntimeError(String),
-    
+
     #[error("Configuration error: {0}")]
     ConfigError(String),
-    
+
     /// IO and serialization errors
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    
+
     /// Generic anyhow error for flexibility
     #[error("Error: {0}")]
     Anyhow(#[from] anyhow::Error),
@@ -72,17 +72,17 @@ impl Error {
             Error::ModelNotFound(_) => 404,
             Error::InvalidModel(_) => 400,
             Error::RateLimitExceeded => 429,
-            
+
             // 5xx Server Errors
             Error::ServiceUnavailable(_) => 503,
             Error::ModelLoadFailed(_) => 503,
             Error::RuntimeNotReady => 503,
-            
+
             // Timeout/Cancellation
             Error::Timeout(_) => 408,
             Error::Cancelled(_) => 499,
             Error::UserCancelled => 499,
-            
+
             // Internal Errors
             Error::Internal(_) => 500,
             Error::RuntimeError(_) => 500,
@@ -92,7 +92,7 @@ impl Error {
             Error::Anyhow(_) => 500,
         }
     }
-    
+
     /// Get error type for metrics/logging
     pub fn error_type(&self) -> &'static str {
         match self {
@@ -115,15 +115,15 @@ impl Error {
             Error::Anyhow(_) => "unknown",
         }
     }
-    
+
     /// Check if error is retryable
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Error::ServiceUnavailable(_) | 
-            Error::RuntimeNotReady | 
-            Error::Timeout(_) |
-            Error::Io(_)
+            Error::ServiceUnavailable(_)
+                | Error::RuntimeNotReady
+                | Error::Timeout(_)
+                | Error::Io(_)
         )
     }
 }

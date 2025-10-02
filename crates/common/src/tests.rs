@@ -2,7 +2,7 @@
 mod tests {
     use crate::dto::*;
     use crate::error::Error;
-    
+
     #[test]
     fn test_message_validation() {
         // Valid message
@@ -11,14 +11,14 @@ mod tests {
             content: "Hello".to_string(),
         };
         assert!(msg.validate().is_ok());
-        
+
         // Empty content
         let msg = Message {
             role: Role::User,
             content: "".to_string(),
         };
         assert!(matches!(msg.validate(), Err(Error::BadRequest(_))));
-        
+
         // Too long content
         let msg = Message {
             role: Role::User,
@@ -26,7 +26,7 @@ mod tests {
         };
         assert!(matches!(msg.validate(), Err(Error::BadRequest(_))));
     }
-    
+
     #[test]
     fn test_request_validation() {
         // Valid request
@@ -44,7 +44,7 @@ mod tests {
             repeat_penalty: Some(1.1),
         };
         assert!(req.validate().is_ok());
-        
+
         // Empty messages
         let req = ChatCompletionRequest {
             model: None,
@@ -57,7 +57,7 @@ mod tests {
             repeat_penalty: None,
         };
         assert!(matches!(req.validate(), Err(Error::BadRequest(_))));
-        
+
         // Invalid temperature
         let req = ChatCompletionRequest {
             model: None,
@@ -73,7 +73,7 @@ mod tests {
             repeat_penalty: None,
         };
         assert!(matches!(req.validate(), Err(Error::BadRequest(_))));
-        
+
         // Invalid max_tokens
         let req = ChatCompletionRequest {
             model: None,
@@ -89,7 +89,7 @@ mod tests {
             repeat_penalty: None,
         };
         assert!(matches!(req.validate(), Err(Error::BadRequest(_))));
-        
+
         // Invalid top_p
         let req = ChatCompletionRequest {
             model: None,
@@ -106,7 +106,7 @@ mod tests {
         };
         assert!(matches!(req.validate(), Err(Error::BadRequest(_))));
     }
-    
+
     #[test]
     fn test_role_conversion() {
         assert_eq!(Role::from("system".to_string()), Role::System);
@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(Role::from("ASSISTANT".to_string()), Role::Assistant);
         assert_eq!(Role::from("unknown".to_string()), Role::User); // Default
     }
-    
+
     #[test]
     fn test_error_status_codes() {
         assert_eq!(Error::BadRequest("test".into()).status_code(), 400);
@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(Error::UserCancelled.status_code(), 499);
         assert_eq!(Error::Internal("test".into()).status_code(), 500);
     }
-    
+
     #[test]
     fn test_error_retryable() {
         assert!(Error::ServiceUnavailable("test".into()).is_retryable());
@@ -137,7 +137,7 @@ mod tests {
         assert!(!Error::BadRequest("test".into()).is_retryable());
         assert!(!Error::ModelNotFound("test".into()).is_retryable());
     }
-    
+
     #[test]
     fn test_generation_params_from_request() {
         let req = ChatCompletionRequest {
@@ -150,10 +150,10 @@ mod tests {
             top_k: Some(50),
             repeat_penalty: Some(1.2),
         };
-        
+
         let defaults = GenerationParams::default();
         let params = GenerationParams::from_request(&req, defaults);
-        
+
         assert_eq!(params.temperature, 0.8);
         assert_eq!(params.max_tokens, 200);
         assert_eq!(params.top_p, 0.95);

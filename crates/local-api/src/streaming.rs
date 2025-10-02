@@ -1,7 +1,7 @@
 use axum::response::sse::{Event, Sse};
 use chatsafe_common::{
-    ChatCompletionChunk, StreamChoice, DeltaContent, StreamFrame,
-    Error as CommonError, ObservableMetrics, RequestId,
+    ChatCompletionChunk, DeltaContent, Error as CommonError, ObservableMetrics, RequestId,
+    StreamChoice, StreamFrame,
 };
 use futures::stream::Stream;
 use futures::StreamExt;
@@ -15,15 +15,15 @@ use tracing::error;
 use crate::rate_limiter::RateLimiter;
 
 // Constants
-const BUFFER_SIZE: usize = 32;  // Maximum chunks to buffer for backpressure
-const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);  // Timeout per chunk
+const BUFFER_SIZE: usize = 32; // Maximum chunks to buffer for backpressure
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(30); // Timeout per chunk
 const CHUNK_OBJECT_TYPE: &str = "chat.completion.chunk";
 const DONE_MARKER: &str = "[DONE]";
 const ERROR_TYPE_RUNTIME: &str = "runtime_error";
 const ERROR_TYPE_STREAM: &str = "stream_error";
 
 /// Create an SSE streaming response with observability and backpressure control
-/// 
+///
 /// This function sets up a bounded channel to prevent memory growth from slow clients,
 /// and ensures proper cleanup of rate limits and request tracking.
 pub fn streaming_response_with_observability(
@@ -36,19 +36,28 @@ pub fn streaming_response_with_observability(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Use bounded channel for backpressure
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(BUFFER_SIZE);
-    
+
     // Spawn producer task with automatic cleanup
     tokio::spawn(async move {
-        produce_stream_events(stream, model_id, metrics, tx, rate_limiter, client_ip, request_id).await;
+        produce_stream_events(
+            stream,
+            model_id,
+            metrics,
+            tx,
+            rate_limiter,
+            client_ip,
+            request_id,
+        )
+        .await;
     });
-    
+
     // Consumer stream that yields from the bounded channel
     let response_stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
             yield event;
         }
     };
-    
+
     Sse::new(response_stream)
 }
 
@@ -63,15 +72,20 @@ async fn produce_stream_events(
     request_id: RequestId,
 ) {
     // Ensure cleanup happens when function exits
-    let _cleanup = CleanupGuard::new(rate_limiter.clone(), client_ip, metrics.clone(), request_id.clone());
-    
+    let _cleanup = CleanupGuard::new(
+        rate_limiter.clone(),
+        client_ip,
+        metrics.clone(),
+        request_id.clone(),
+    );
+
     let request_id_str = Arc::new(request_id.to_string());
     let model_id = Arc::new(model_id);
     let created = get_unix_timestamp();
-    
+
     let mut first_token_recorded = false;
     let stream_start = std::time::Instant::now();
-    
+
     let mut ctx = FrameContext {
         tx: &tx,
         request_id: &request_id_str,
@@ -81,13 +95,14 @@ async fn produce_stream_events(
         first_token_recorded: &mut first_token_recorded,
         stream_start,
     };
-    
-    while let Some(frame_result) = tokio::time::timeout(
-        CHUNK_TIMEOUT,
-        stream.next()
-    ).await.ok().flatten() {
+
+    while let Some(frame_result) = tokio::time::timeout(CHUNK_TIMEOUT, stream.next())
+        .await
+        .ok()
+        .flatten()
+    {
         let should_continue = process_stream_frame(frame_result, &mut ctx).await;
-        
+
         if !should_continue {
             break;
         }
@@ -122,14 +137,21 @@ async fn process_stream_frame(
                 let latency_ms = ctx.stream_start.elapsed().as_millis() as u64;
                 ctx.metrics.record_first_token_latency(latency_ms).await;
             }
-            
+
             // Track chunk sent
             ctx.metrics.record_chunk().await;
-            
+
             send_delta_chunk(ctx.tx, ctx.request_id, ctx.model_id, ctx.created, content).await
         }
         Ok(StreamFrame::Done { finish_reason, .. }) => {
-            send_done_chunk(ctx.tx, ctx.request_id, ctx.model_id, ctx.created, finish_reason).await;
+            send_done_chunk(
+                ctx.tx,
+                ctx.request_id,
+                ctx.model_id,
+                ctx.created,
+                finish_reason,
+            )
+            .await;
             false // Stop streaming
         }
         Ok(StreamFrame::Error { message }) => {
@@ -151,15 +173,8 @@ async fn send_start_chunk(
     created: i64,
     role: chatsafe_common::Role,
 ) -> bool {
-    let chunk = create_chunk(
-        request_id,
-        model_id,
-        created,
-        Some(role),
-        None,
-        None,
-    );
-    
+    let chunk = create_chunk(request_id, model_id, created, Some(role), None, None);
+
     send_chunk_event(tx, chunk).await
 }
 
@@ -171,15 +186,8 @@ async fn send_delta_chunk(
     created: i64,
     content: String,
 ) -> bool {
-    let chunk = create_chunk(
-        request_id,
-        model_id,
-        created,
-        None,
-        Some(content),
-        None,
-    );
-    
+    let chunk = create_chunk(request_id, model_id, created, None, Some(content), None);
+
     send_chunk_event(tx, chunk).await
 }
 
@@ -200,13 +208,15 @@ async fn send_done_chunk(
         None,
         Some(finish_reason),
     );
-    
+
     if !send_chunk_event(tx, chunk).await {
         return false;
     }
-    
+
     // Send [DONE] marker
-    tx.send(Ok(Event::default().data(DONE_MARKER))).await.is_ok()
+    tx.send(Ok(Event::default().data(DONE_MARKER)))
+        .await
+        .is_ok()
 }
 
 /// Create a ChatCompletionChunk with the given parameters
@@ -237,9 +247,7 @@ async fn send_chunk_event(
     chunk: ChatCompletionChunk,
 ) -> bool {
     match serde_json::to_string(&chunk) {
-        Ok(json) => {
-            tx.send(Ok(Event::default().data(json))).await.is_ok()
-        }
+        Ok(json) => tx.send(Ok(Event::default().data(json))).await.is_ok(),
         Err(e) => {
             error!("Failed to serialize chunk: {}", e);
             false
@@ -259,7 +267,9 @@ async fn send_error_event(
             "type": error_type
         }
     });
-    tx.send(Ok(Event::default().data(error_data.to_string()))).await.is_ok()
+    tx.send(Ok(Event::default().data(error_data.to_string())))
+        .await
+        .is_ok()
 }
 
 /// Get current Unix timestamp
@@ -285,7 +295,12 @@ impl CleanupGuard {
         metrics: Arc<ObservableMetrics>,
         request_id: RequestId,
     ) -> Self {
-        Self { rate_limiter, client_ip, metrics, request_id }
+        Self {
+            rate_limiter,
+            client_ip,
+            metrics,
+            request_id,
+        }
     }
 }
 
@@ -296,7 +311,7 @@ impl Drop for CleanupGuard {
         let ip = self.client_ip;
         let metrics = self.metrics.clone();
         let req_id = self.request_id.clone();
-        
+
         // Spawn cleanup task
         tokio::spawn(async move {
             limiter.release_request(ip).await;

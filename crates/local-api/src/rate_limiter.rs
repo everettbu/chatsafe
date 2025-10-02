@@ -1,10 +1,10 @@
+use chatsafe_common::{Error, Result};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use chatsafe_common::{Error, Result};
 
 // Constants
 const CLEANUP_RETENTION_SECS: u64 = 300; // 5 minutes
@@ -37,7 +37,7 @@ impl TokenBucket {
     /// Returns true if successful, false if not enough tokens
     fn try_consume(&mut self, tokens: u32) -> bool {
         self.refill();
-        
+
         if self.tokens >= tokens as f64 {
             self.tokens -= tokens as f64;
             true
@@ -50,12 +50,11 @@ impl TokenBucket {
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        
-        self.tokens = (self.tokens + elapsed * self.refill_rate)
-            .min(self.capacity as f64);
+
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity as f64);
         self.last_refill = now;
     }
-    
+
     /// Return a consumed token (for rollback scenarios)
     fn return_token(&mut self) {
         self.tokens = (self.tokens + 1.0).min(self.capacity as f64);
@@ -98,7 +97,7 @@ struct IpState {
 }
 
 /// Rate limiter for the API
-/// 
+///
 /// Implements both per-IP and global rate limiting using token bucket algorithm.
 /// Also enforces concurrent request limits per IP.
 pub struct RateLimiter {
@@ -138,16 +137,16 @@ impl RateLimiter {
         limiter.start_cleanup_task();
         limiter
     }
-    
+
     /// Start the background cleanup task
     fn start_cleanup_task(&self) {
         let ip_states = self.ip_states.clone();
         let interval = self.config.cleanup_interval;
-        
+
         let handle = tokio::spawn(async move {
             Self::cleanup_loop(ip_states, interval).await;
         });
-        
+
         // Store handle for cleanup
         let cleanup_handle = self.cleanup_handle.clone();
         tokio::spawn(async move {
@@ -157,7 +156,7 @@ impl RateLimiter {
     }
 
     /// Check if a request from the given IP is allowed
-    /// 
+    ///
     /// This checks both global and per-IP rate limits, as well as
     /// concurrent request limits. Returns an error if any limit is exceeded.
     /// Optimized to avoid double-locking when global check fails.
@@ -167,24 +166,22 @@ impl RateLimiter {
             ip: IpAddr,
             needs_rollback: bool,
         }
-        
+
         let mut rollback_info = RollbackInfo {
             ip,
             needs_rollback: false,
         };
-        
+
         // First check and update per-IP limits
         {
             let mut states = self.ip_states.write().await;
-            let state = states.entry(ip).or_insert_with(|| {
-                IpState {
-                    bucket: TokenBucket::new(
-                        self.config.per_ip_per_minute,
-                        self.config.per_ip_per_minute as f64 / TOKENS_PER_MINUTE_TO_PER_SECOND,
-                    ),
-                    concurrent_requests: 0,
-                    last_seen: Instant::now(),
-                }
+            let state = states.entry(ip).or_insert_with(|| IpState {
+                bucket: TokenBucket::new(
+                    self.config.per_ip_per_minute,
+                    self.config.per_ip_per_minute as f64 / TOKENS_PER_MINUTE_TO_PER_SECOND,
+                ),
+                concurrent_requests: 0,
+                last_seen: Instant::now(),
             });
 
             // Update last seen
@@ -199,18 +196,18 @@ impl RateLimiter {
             if !state.bucket.try_consume(1) {
                 return Err(Error::RateLimitExceeded);
             }
-            
+
             // Update state - will need rollback if global check fails
             state.concurrent_requests += 1;
             rollback_info.needs_rollback = true;
         } // Lock released here
-        
+
         // Then check global rate limit
         let global_check_passed = {
             let mut global_bucket = self.global_bucket.write().await;
             global_bucket.try_consume(1)
         };
-        
+
         if !global_check_passed {
             // Rollback IP state if needed
             if rollback_info.needs_rollback {
@@ -242,10 +239,10 @@ impl RateLimiter {
         let mut interval = tokio::time::interval(cleanup_interval);
         loop {
             interval.tick().await;
-            
+
             let mut states = ip_states.write().await;
             let now = Instant::now();
-            
+
             // Remove IPs that haven't been seen for the retention period
             // and have no concurrent requests
             states.retain(|_, state| {
@@ -254,7 +251,7 @@ impl RateLimiter {
             });
         }
     }
-    
+
     /// Stop the cleanup task (for graceful shutdown)
     #[allow(dead_code)]
     pub async fn shutdown(&self) {
@@ -290,7 +287,7 @@ mod tests {
             global_per_minute: 100,
             cleanup_interval: Duration::from_secs(60),
         };
-        
+
         let limiter = RateLimiter::new(config);
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
@@ -312,7 +309,7 @@ mod tests {
             global_per_minute: 1000,
             cleanup_interval: Duration::from_secs(60),
         };
-        
+
         let limiter = RateLimiter::new(config);
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
@@ -329,26 +326,26 @@ mod tests {
         // Now another request should succeed
         assert!(limiter.check_rate_limit(ip).await.is_ok());
     }
-    
+
     #[tokio::test]
     async fn test_global_limit_rollback() {
         let config = RateLimiterConfig {
             per_ip_per_minute: 100,
             max_concurrent_per_ip: 10,
-            global_per_minute: 1,  // Very low global limit
+            global_per_minute: 1, // Very low global limit
             cleanup_interval: Duration::from_secs(60),
         };
-        
+
         let limiter = RateLimiter::new(config);
         let ip1 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
         let ip2 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 
         // First request should succeed
         assert!(limiter.check_rate_limit(ip1).await.is_ok());
-        
+
         // Second request from different IP should fail (global limit)
         assert!(limiter.check_rate_limit(ip2).await.is_err());
-        
+
         // IP2 state should be rolled back (no concurrent requests)
         {
             let states = limiter.ip_states.read().await;

@@ -1,9 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use super::{rate_limiter::{RateLimiter, RateLimiterConfig}, RateLimitGuard};
     use axum::http::StatusCode;
+    use chatsafe_common::{ChatCompletionRequest, HealthResponse, HealthStatus, Message, Role};
     use serde_json::json;
-    use chatsafe_common::{ChatCompletionRequest, Message, Role, HealthStatus, HealthResponse};
-
+    use std::net::{IpAddr, Ipv4Addr};
+    use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn test_request_validation_empty_messages() {
@@ -20,7 +22,7 @@ mod tests {
 
         let result = request.validate();
         assert!(result.is_err());
-        
+
         if let Err(e) = result {
             assert_eq!(e.status_code(), StatusCode::BAD_REQUEST);
         }
@@ -44,7 +46,7 @@ mod tests {
 
         let result = request.validate();
         assert!(result.is_err());
-        
+
         if let Err(e) = result {
             assert_eq!(e.status_code(), StatusCode::BAD_REQUEST);
         }
@@ -140,7 +142,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(&health).expect("Failed to serialize health response");
-        
+
         assert_eq!(json["status"], "healthy");
         assert_eq!(json["model_loaded"], true);
         assert_eq!(json["version"], "0.1.0");
@@ -185,8 +187,9 @@ mod tests {
             "stream": true
         });
 
-        let request: ChatCompletionRequest = serde_json::from_value(json).expect("Failed to deserialize request");
-        
+        let request: ChatCompletionRequest =
+            serde_json::from_value(json).expect("Failed to deserialize request");
+
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].content, "Hello");
         assert_eq!(request.temperature, Some(0.8));
@@ -258,6 +261,62 @@ mod tests {
         };
 
         assert!(request.model.is_some());
-        assert_eq!(request.model.expect("Model should be present"), "llama-3.2-3b-instruct-q4_k_m");
+        assert_eq!(
+            request.model.expect("Model should be present"),
+            "llama-3.2-3b-instruct-q4_k_m"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_guard_releases_on_drop() {
+        let config = RateLimiterConfig {
+            per_ip_per_minute: 100,
+            max_concurrent_per_ip: 1,
+            global_per_minute: 1000,
+            cleanup_interval: Duration::from_secs(60),
+        };
+
+        let limiter = RateLimiter::new(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        limiter
+            .check_rate_limit(ip)
+            .await
+            .expect("initial check should pass");
+
+        {
+            let guard = RateLimitGuard::new(limiter.clone(), ip);
+            drop(guard);
+        }
+
+        sleep(Duration::from_millis(10)).await;
+
+        assert!(limiter.check_rate_limit(ip).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rate_guard_disarm_keeps_slot_held() {
+        let config = RateLimiterConfig {
+            per_ip_per_minute: 100,
+            max_concurrent_per_ip: 1,
+            global_per_minute: 1000,
+            cleanup_interval: Duration::from_secs(60),
+        };
+
+        let limiter = RateLimiter::new(config);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        limiter
+            .check_rate_limit(ip)
+            .await
+            .expect("initial check should pass");
+
+        {
+            let mut guard = RateLimitGuard::new(limiter.clone(), ip);
+            guard.disarm();
+        }
+
+        let err = limiter.check_rate_limit(ip).await;
+        assert!(err.is_err(), "slot should remain held after disarm");
     }
 }

@@ -5,28 +5,29 @@ mod streaming;
 #[cfg(test)]
 mod tests;
 use axum::{
-    extract::{State, ConnectInfo},
+    extract::{ConnectInfo, State},
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
-    http::{HeaderValue, StatusCode},
 };
 use chatsafe_common::{
-    ChatCompletionRequest, ChatCompletionResponse,
-    Message, Choice, Usage, Role, FinishReason,
-    HealthResponse, HealthStatus, GenerationParams, StreamFrame,
-    Error as CommonError, ErrorResponse, ObservableMetrics, RequestId,
-    ObservableMetricsSnapshot,
+    ChatCompletionRequest, ChatCompletionResponse, Choice, Error as CommonError, ErrorResponse,
+    FinishReason, GenerationParams, HealthResponse, HealthStatus, Message, ObservableMetrics,
+    ObservableMetricsSnapshot, RequestId, Role, StreamFrame, Usage,
 };
 use chatsafe_config::{ConfigLoader, ModelRegistry};
-use chatsafe_runtime::{RuntimeHandle, ModelRuntime, ModelHandle};
+use chatsafe_runtime::{ModelHandle, ModelRuntime, RuntimeHandle};
 use futures::StreamExt;
+use rate_limiter::{RateLimiter, RateLimiterConfig};
 use serde_json::json;
-use std::{net::SocketAddr, sync::Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
-use rate_limiter::{RateLimiter, RateLimiterConfig};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -36,6 +37,48 @@ const HEALTH_CHECK_TIMEOUT_SECS: u64 = 2;
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_MODEL_NAME: &str = "unknown";
 const CHAT_COMPLETION_OBJECT: &str = "chat.completion";
+
+/// Ensures rate limit slots are released on all early exits.
+struct RateLimitGuard {
+    rate_limiter: RateLimiter,
+    ip: IpAddr,
+    released: bool,
+}
+
+impl RateLimitGuard {
+    fn new(rate_limiter: RateLimiter, ip: IpAddr) -> Self {
+        Self {
+            rate_limiter,
+            ip,
+            released: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.released = true;
+    }
+
+    async fn release_now(&mut self) {
+        if !self.released {
+            self.rate_limiter.release_request(self.ip).await;
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for RateLimitGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+
+        let limiter = self.rate_limiter.clone();
+        let ip = self.ip;
+        tokio::spawn(async move {
+            limiter.release_request(ip).await;
+        });
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -55,7 +98,7 @@ fn create_error_response(
 ) -> Response {
     let mut error_response = ErrorResponse::from(error);
     error_response.request_id = Some(request_id.to_string());
-    
+
     (
         status,
         [
@@ -87,7 +130,7 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     // Apply timeout to health check
     let health_future = state.runtime.health();
     let timeout_duration = Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS);
-    
+
     let health = match tokio::time::timeout(timeout_duration, health_future).await {
         Ok(Ok(health)) => health,
         Ok(Err(_)) | Err(_) => {
@@ -100,16 +143,14 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
             }
         }
     };
-    
-    let uptime = state.start_time.elapsed()
-        .unwrap_or_default()
-        .as_secs();
-    
+
+    let uptime = state.start_time.elapsed().unwrap_or_default().as_secs();
+
     Json(HealthResponse {
-        status: if health.is_healthy { 
-            HealthStatus::Healthy 
-        } else { 
-            HealthStatus::Unhealthy 
+        status: if health.is_healthy {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Unhealthy
         },
         model_loaded: health.model_loaded.is_some(),
         version: API_VERSION.to_string(),
@@ -128,12 +169,14 @@ async fn handle_streaming(
     ip: std::net::IpAddr,
 ) -> Result<Response, Response> {
     let model_id = handle.model_id.to_string();
-    
-    let stream = state.runtime.generate(handle, messages, params)
+
+    let stream = state
+        .runtime
+        .generate(handle, messages, params)
         .await
         .map_err(|e| {
             let response = create_error_response(&e, request_id, StatusCode::INTERNAL_SERVER_ERROR);
-            
+
             // Complete request tracking on error
             let metrics = Arc::clone(&state.metrics);
             let req_id = request_id.clone();
@@ -142,10 +185,10 @@ async fn handle_streaming(
                 metrics.record_error(Some(&req_id), &e).await;
                 metrics.complete_request(&tracked_id).await;
             });
-            
+
             response
         })?;
-    
+
     // Request completion is handled by streaming module's CleanupGuard
     let mut response = streaming::streaming_response_with_observability(
         stream,
@@ -154,8 +197,9 @@ async fn handle_streaming(
         state.rate_limiter.clone(),
         ip,
         tracked_request_id.clone(),
-    ).into_response();
-    
+    )
+    .into_response();
+
     add_request_id_header(&mut response, request_id);
     Ok(response)
 }
@@ -171,12 +215,14 @@ async fn handle_non_streaming(
     ip: std::net::IpAddr,
 ) -> Result<Response, Response> {
     let model_id = handle.model_id.to_string();
-    
-    let mut stream = state.runtime.generate(handle, messages, params.clone())
+
+    let mut stream = state
+        .runtime
+        .generate(handle, messages, params.clone())
         .await
         .map_err(|e| {
             let response = create_error_response(&e, request_id, StatusCode::INTERNAL_SERVER_ERROR);
-            
+
             // Complete request tracking on error
             let metrics = Arc::clone(&state.metrics);
             let req_id = request_id.clone();
@@ -185,38 +231,45 @@ async fn handle_non_streaming(
                 metrics.record_error(Some(&req_id), &e).await;
                 metrics.complete_request(&tracked_id).await;
             });
-            
+
             response
         })?;
-    
+
     // Collect all frames
     let mut content = String::new();
     let mut usage = Usage::default();
     let mut finish_reason = FinishReason::Stop;
-    
+
     while let Some(frame) = stream.next().await {
         match frame {
             Ok(StreamFrame::Delta { content: delta }) => {
                 content.push_str(&delta);
             }
-            Ok(StreamFrame::Done { finish_reason: reason, usage: u }) => {
+            Ok(StreamFrame::Done {
+                finish_reason: reason,
+                usage: u,
+            }) => {
                 finish_reason = reason;
                 usage = u;
             }
             Ok(StreamFrame::Error { message }) => {
                 // Complete request tracking on error
                 state.rate_limiter.release_request(ip).await;
-                
+
                 let err = CommonError::RuntimeError(message);
                 state.metrics.record_error(Some(request_id), &err).await;
                 state.metrics.complete_request(tracked_request_id).await;
-                
-                return Err(create_error_response(&err, request_id, StatusCode::INTERNAL_SERVER_ERROR));
+
+                return Err(create_error_response(
+                    &err,
+                    request_id,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
             }
             _ => {}
         }
     }
-    
+
     // Create response
     let response = ChatCompletionResponse {
         id: params.request_id,
@@ -236,17 +289,17 @@ async fn handle_non_streaming(
         }],
         usage,
     };
-    
+
     // Release rate limit for non-streaming requests
     state.rate_limiter.release_request(ip).await;
-    
+
     // Complete request tracking
     state.metrics.complete_request(tracked_request_id).await;
-    
+
     // Create response with headers
     let mut http_response = Json(response).into_response();
     add_request_id_header(&mut http_response, request_id);
-    
+
     Ok(http_response)
 }
 
@@ -256,88 +309,131 @@ async fn chat_completion(
     Json(request): Json<ChatCompletionRequest>,
 ) -> Result<Response, Response> {
     let ip = addr.ip();
-    
+
     // Generate request ID for tracing
     let request_id = RequestId::new();
-    
+
     // Start tracking this request early for all paths
     let is_streaming = request.stream.unwrap_or(true);
-    let model_name = request.model.clone().unwrap_or_else(|| String::from(DEFAULT_MODEL_NAME));
-    let tracked_request_id = state.metrics.start_request(
-        request_id.clone(),
-        model_name.clone(),
-        is_streaming
-    ).await;
-    
+    let model_name = request
+        .model
+        .clone()
+        .unwrap_or_else(|| String::from(DEFAULT_MODEL_NAME));
+    let tracked_request_id = state
+        .metrics
+        .start_request(request_id.clone(), model_name.clone(), is_streaming)
+        .await;
+
     // Check rate limit
     if let Err(e) = state.rate_limiter.check_rate_limit(ip).await {
         state.metrics.record_error(Some(&request_id), &e).await;
         state.metrics.record_rate_limit(ip.to_string()).await;
         state.metrics.complete_request(&tracked_request_id).await;
-        
-        return Err(create_error_response(&e, &request_id, StatusCode::TOO_MANY_REQUESTS));
+
+        return Err(create_error_response(
+            &e,
+            &request_id,
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
     }
-    
+
+    let mut rate_guard = RateLimitGuard::new(state.rate_limiter.clone(), ip);
+
     // Validate request
     if let Err(e) = request.validate() {
         state.metrics.record_error(Some(&request_id), &e).await;
         state.metrics.complete_request(&tracked_request_id).await;
-        
-        return Err(create_error_response(&e, &request_id, StatusCode::BAD_REQUEST));
+
+        return Err(create_error_response(
+            &e,
+            &request_id,
+            StatusCode::BAD_REQUEST,
+        ));
     }
-    
+
     // Get model handle
-    let handle = state.model_handle.read().await.clone()
-        .ok_or_else(|| {
-            let err = CommonError::RuntimeNotReady;
-            let response = create_error_response(&err, &request_id, StatusCode::SERVICE_UNAVAILABLE);
-            
-            // Record error and complete request tracking
-            let metrics = Arc::clone(&state.metrics);
-            let req_id = request_id.clone();
-            let tracked_id = tracked_request_id.clone();
-            tokio::spawn(async move {
-                metrics.record_error(Some(&req_id), &err).await;
-                metrics.complete_request(&tracked_id).await;
-            });
-            
-            response
-        })?;
-    
-    // Get model config and create params
-    let model_id = &handle.model_id;
-    let mut params = state.registry.apply_overrides(
-        model_id,
-        request.temperature,
-        request.max_tokens,
-        request.top_p,
-        request.top_k,
-        request.repeat_penalty,
-    ).map_err(|e| {
-        let response = create_error_response(&e, &request_id, StatusCode::INTERNAL_SERVER_ERROR);
-        
-        // Record error and complete request
+    let handle = state.model_handle.read().await.clone().ok_or_else(|| {
+        let err = CommonError::RuntimeNotReady;
+        let response = create_error_response(&err, &request_id, StatusCode::SERVICE_UNAVAILABLE);
+
+        // Record error and complete request tracking
         let metrics = Arc::clone(&state.metrics);
         let req_id = request_id.clone();
         let tracked_id = tracked_request_id.clone();
         tokio::spawn(async move {
-            metrics.record_error(Some(&req_id), &e).await;
+            metrics.record_error(Some(&req_id), &err).await;
             metrics.complete_request(&tracked_id).await;
         });
-        
+
         response
     })?;
-    
+
+    // Get model config and create params
+    let model_id = &handle.model_id;
+    let mut params = state
+        .registry
+        .apply_overrides(
+            model_id,
+            request.temperature,
+            request.max_tokens,
+            request.top_p,
+            request.top_k,
+            request.repeat_penalty,
+        )
+        .map_err(|e| {
+            let response =
+                create_error_response(&e, &request_id, StatusCode::INTERNAL_SERVER_ERROR);
+
+            // Record error and complete request
+            let metrics = Arc::clone(&state.metrics);
+            let req_id = request_id.clone();
+            let tracked_id = tracked_request_id.clone();
+            tokio::spawn(async move {
+                metrics.record_error(Some(&req_id), &e).await;
+                metrics.complete_request(&tracked_id).await;
+            });
+
+            response
+        })?;
+
     // Add request ID to params for tracing
     params.request_id = request_id.to_string();
-    
+
     // Convert messages
     let messages: Vec<Message> = request.messages;
-    
+
     if is_streaming {
-        handle_streaming(&state, &handle, messages, params, &request_id, &tracked_request_id, ip).await
+        let result = handle_streaming(
+            &state,
+            &handle,
+            messages,
+            params,
+            &request_id,
+            &tracked_request_id,
+            ip,
+        )
+        .await;
+        if result.is_ok() {
+            rate_guard.disarm();
+        }
+        result
     } else {
-        handle_non_streaming(&state, &handle, messages, params, &request_id, &tracked_request_id, ip).await
+        let result = handle_non_streaming(
+            &state,
+            &handle,
+            messages,
+            params,
+            &request_id,
+            &tracked_request_id,
+            ip,
+        )
+        .await;
+        if result.is_ok() {
+            rate_guard.disarm();
+        } else {
+            rate_guard.release_now().await;
+        }
+        result
     }
 }
 
@@ -351,19 +447,22 @@ async fn version() -> Json<serde_json::Value> {
 
 async fn get_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     let models = state.registry.list_models();
-    let model_info: Vec<serde_json::Value> = models.iter().map(|id| {
-        if let Ok(model) = state.registry.get_model(id) {
-            json!({
-                "id": model.id,
-                "name": model.name,
-                "context_window": model.ctx_window,
-                "default": model.default
-            })
-        } else {
-            json!({"id": id})
-        }
-    }).collect();
-    
+    let model_info: Vec<serde_json::Value> = models
+        .iter()
+        .map(|id| {
+            if let Ok(model) = state.registry.get_model(id) {
+                json!({
+                    "id": model.id,
+                    "name": model.name,
+                    "context_window": model.ctx_window,
+                    "default": model.default
+                })
+            } else {
+                json!({"id": id})
+            }
+        })
+        .collect();
+
     Json(json!({
         "models": model_info
     }))
@@ -378,30 +477,32 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive(tracing::Level::INFO.into()))
+        .with(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
         .init();
 
     info!("Starting ChatSafe local API server");
-    
+
     // Load configuration
     let config = ConfigLoader::load(None)?;
-    
+
     // Load model registry
     let registry = ModelRegistry::load_defaults()?;
-    
+
     // Create runtime
     let runtime = ModelRuntime::create(&config, &registry).await?;
-    
+
     // Load default model
     let default_model = registry.get_default_model()?;
     info!("Loading default model: {}", default_model.id);
-    
+
     let model_handle = runtime.load(&default_model.id).await?;
-    
+
     // Create rate limiter
     let rate_limiter = RateLimiter::new(RateLimiterConfig::default());
-    
+
     // Create app state
     let state = AppState {
         runtime,
@@ -411,7 +512,7 @@ async fn main() -> Result<()> {
         metrics: Arc::new(ObservableMetrics::new()),
         rate_limiter,
     };
-    
+
     // Build router with tracing layer
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completion))
@@ -422,19 +523,19 @@ async fn main() -> Result<()> {
         .route("/models", get(get_models))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
-    
+
     // Start server
     let addr = SocketAddr::from(([127, 0, 0, 1], config.server.port));
     info!("Listening on http://{} (localhost only)", addr);
-    
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    
+
     // Use into_make_service_with_connect_info to get client IP addresses
     axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>()
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
-    
+
     Ok(())
 }
