@@ -39,14 +39,14 @@ const DEFAULT_MODEL_NAME: &str = "unknown";
 const CHAT_COMPLETION_OBJECT: &str = "chat.completion";
 
 /// Ensures rate limit slots are released on all early exits.
-struct RateLimitGuard {
+pub(crate) struct RateLimitGuard {
     rate_limiter: RateLimiter,
     ip: IpAddr,
     released: bool,
 }
 
 impl RateLimitGuard {
-    fn new(rate_limiter: RateLimiter, ip: IpAddr) -> Self {
+    pub(crate) fn new(rate_limiter: RateLimiter, ip: IpAddr) -> Self {
         Self {
             rate_limiter,
             ip,
@@ -54,7 +54,7 @@ impl RateLimitGuard {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.released = true;
     }
 

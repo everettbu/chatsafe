@@ -7,6 +7,7 @@ This document tracks the current state, changelog, and open issues for ChatSafe.
 ### 2025-10-03: Rate Limiter Guard & Streaming Fixes
 - ✅ Added `RateLimitGuard` to ensure per-IP slots are released on every early return in `chat_completion`.
 - ✅ Streaming fallback in `LlamaAdapter` now emits the safety message only once and ignores further polluted tokens.
+- ✅ Added targeted tests for `RateLimitGuard` and SSE fallback to catch regressions early.
 - ⚠️ README instructs creating a TOML `config.toml`, but `ConfigLoader` only reads JSON (`chatsafe.json`, `config.json`). Documentation and loader must be aligned.
 - ✅ `cargo test --all`
 

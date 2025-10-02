@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use super::{rate_limiter::{RateLimiter, RateLimiterConfig}, RateLimitGuard};
+    use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+    use crate::RateLimitGuard;
     use axum::http::StatusCode;
     use chatsafe_common::{ChatCompletionRequest, HealthResponse, HealthStatus, Message, Role};
     use serde_json::json;
