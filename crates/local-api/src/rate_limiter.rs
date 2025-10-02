@@ -256,6 +256,7 @@ impl RateLimiter {
     }
     
     /// Stop the cleanup task (for graceful shutdown)
+    #[allow(dead_code)]
     pub async fn shutdown(&self) {
         if let Some(handle) = self.cleanup_handle.write().await.take() {
             handle.abort();

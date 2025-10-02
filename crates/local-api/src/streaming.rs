@@ -72,20 +72,21 @@ async fn produce_stream_events(
     let mut first_token_recorded = false;
     let stream_start = std::time::Instant::now();
     
+    let mut ctx = FrameContext {
+        tx: &tx,
+        request_id: &request_id_str,
+        model_id: &model_id,
+        created,
+        metrics: &metrics,
+        first_token_recorded: &mut first_token_recorded,
+        stream_start,
+    };
+    
     while let Some(frame_result) = tokio::time::timeout(
         CHUNK_TIMEOUT,
         stream.next()
     ).await.ok().flatten() {
-        let should_continue = process_stream_frame(
-            frame_result,
-            &tx,
-            &request_id_str,
-            &model_id,
-            created,
-            &metrics,
-            &mut first_token_recorded,
-            stream_start,
-        ).await;
+        let should_continue = process_stream_frame(frame_result, &mut ctx).await;
         
         if !should_continue {
             break;
@@ -93,45 +94,50 @@ async fn produce_stream_events(
     }
 }
 
+/// Context for processing stream frames
+struct FrameContext<'a> {
+    tx: &'a tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    request_id: &'a Arc<String>,
+    model_id: &'a Arc<String>,
+    created: i64,
+    metrics: &'a Arc<ObservableMetrics>,
+    first_token_recorded: &'a mut bool,
+    stream_start: std::time::Instant,
+}
+
 /// Process a single stream frame and send appropriate SSE event
 /// Returns false if streaming should stop
 async fn process_stream_frame(
     frame_result: Result<StreamFrame, CommonError>,
-    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
-    request_id: &Arc<String>,
-    model_id: &Arc<String>,
-    created: i64,
-    metrics: &Arc<ObservableMetrics>,
-    first_token_recorded: &mut bool,
-    stream_start: std::time::Instant,
+    ctx: &mut FrameContext<'_>,
 ) -> bool {
     match frame_result {
         Ok(StreamFrame::Start { role, .. }) => {
-            send_start_chunk(tx, request_id, model_id, created, role).await
+            send_start_chunk(ctx.tx, ctx.request_id, ctx.model_id, ctx.created, role).await
         }
         Ok(StreamFrame::Delta { content }) => {
             // Record first token latency if needed
-            if !*first_token_recorded {
-                *first_token_recorded = true;
-                let latency_ms = stream_start.elapsed().as_millis() as u64;
-                metrics.record_first_token_latency(latency_ms).await;
+            if !*ctx.first_token_recorded {
+                *ctx.first_token_recorded = true;
+                let latency_ms = ctx.stream_start.elapsed().as_millis() as u64;
+                ctx.metrics.record_first_token_latency(latency_ms).await;
             }
             
             // Track chunk sent
-            metrics.record_chunk().await;
+            ctx.metrics.record_chunk().await;
             
-            send_delta_chunk(tx, request_id, model_id, created, content).await
+            send_delta_chunk(ctx.tx, ctx.request_id, ctx.model_id, ctx.created, content).await
         }
         Ok(StreamFrame::Done { finish_reason, .. }) => {
-            send_done_chunk(tx, request_id, model_id, created, finish_reason).await;
+            send_done_chunk(ctx.tx, ctx.request_id, ctx.model_id, ctx.created, finish_reason).await;
             false // Stop streaming
         }
         Ok(StreamFrame::Error { message }) => {
-            send_error_event(tx, message, ERROR_TYPE_RUNTIME).await;
+            send_error_event(ctx.tx, message, ERROR_TYPE_RUNTIME).await;
             false // Stop streaming
         }
         Err(e) => {
-            send_error_event(tx, e.to_string(), ERROR_TYPE_STREAM).await;
+            send_error_event(ctx.tx, e.to_string(), ERROR_TYPE_STREAM).await;
             false // Stop streaming
         }
     }

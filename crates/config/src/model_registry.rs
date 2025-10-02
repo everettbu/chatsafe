@@ -267,7 +267,7 @@ impl ModelRegistry {
         };
         
         serde_json::to_string_pretty(&data)
-            .map_err(|e| Error::Serialization(e))
+            .map_err(Error::Serialization)
     }
 }
 
@@ -276,7 +276,7 @@ mod sys_info {
     use chatsafe_common::{Result, Error};
     
     pub struct MemInfo {
-        pub total: u64,
+        pub _total: u64,
         pub avail: u64,
     }
     
@@ -287,7 +287,7 @@ mod sys_info {
             use std::process::Command;
             
             let output = Command::new("sysctl")
-                .args(&["-n", "hw.memsize"])
+                .args(["-n", "hw.memsize"])
                 .output()
                 .map_err(|e| Error::Internal(format!("Failed to get memory info: {}", e)))?;
             
@@ -317,7 +317,7 @@ mod sys_info {
             }
             
             Ok(MemInfo {
-                total,
+                _total: total,
                 avail: free_pages * page_size,
             })
         }
@@ -326,7 +326,7 @@ mod sys_info {
         {
             // Simple fallback for other platforms
             Ok(MemInfo {
-                total: 8 * 1024 * 1024 * 1024, // 8GB default
+                _total: 8 * 1024 * 1024 * 1024, // 8GB default
                 avail: 4 * 1024 * 1024 * 1024, // 4GB available
             })
         }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use chatsafe_common::{Result, Error};
+use chatsafe_common::Result;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

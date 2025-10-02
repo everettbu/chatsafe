@@ -6,7 +6,6 @@ use serde::Serialize;
 use uuid::Uuid;
 
 const MAX_SAMPLES: usize = 10000;
-const PERCENTILE_WINDOW: usize = 1000;
 
 /// Request correlation ID for tracing
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -18,6 +17,12 @@ impl Serialize for RequestId {
         S: serde::Serializer,
     {
         serializer.serialize_str(&self.0)
+    }
+}
+
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -140,6 +145,12 @@ struct MetricsData {
     active_streams: u64,
     completed_streams: u64,
     failed_streams: u64,
+}
+
+impl Default for ObservableMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ObservableMetrics {

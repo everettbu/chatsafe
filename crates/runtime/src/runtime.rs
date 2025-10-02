@@ -1,5 +1,4 @@
 use crate::{Runtime, RuntimeHealth, ModelHandle};
-use async_trait::async_trait;
 use chatsafe_common::{Message, GenerationParams, Result, StreamFrame};
 use chatsafe_config::{ModelRegistry, AppConfig};
 use futures::Stream;

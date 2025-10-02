@@ -132,7 +132,7 @@ async fn handle_streaming(
     let stream = state.runtime.generate(handle, messages, params)
         .await
         .map_err(|e| {
-            let response = create_error_response(&e, &request_id, StatusCode::INTERNAL_SERVER_ERROR);
+            let response = create_error_response(&e, request_id, StatusCode::INTERNAL_SERVER_ERROR);
             
             // Complete request tracking on error
             let metrics = Arc::clone(&state.metrics);
@@ -175,7 +175,7 @@ async fn handle_non_streaming(
     let mut stream = state.runtime.generate(handle, messages, params.clone())
         .await
         .map_err(|e| {
-            let response = create_error_response(&e, &request_id, StatusCode::INTERNAL_SERVER_ERROR);
+            let response = create_error_response(&e, request_id, StatusCode::INTERNAL_SERVER_ERROR);
             
             // Complete request tracking on error
             let metrics = Arc::clone(&state.metrics);
@@ -209,7 +209,7 @@ async fn handle_non_streaming(
                 
                 let err = CommonError::RuntimeError(message);
                 state.metrics.record_error(Some(request_id), &err).await;
-                state.metrics.complete_request(&tracked_request_id).await;
+                state.metrics.complete_request(tracked_request_id).await;
                 
                 return Err(create_error_response(&err, request_id, StatusCode::INTERNAL_SERVER_ERROR));
             }
@@ -241,7 +241,7 @@ async fn handle_non_streaming(
     state.rate_limiter.release_request(ip).await;
     
     // Complete request tracking
-    state.metrics.complete_request(&tracked_request_id).await;
+    state.metrics.complete_request(tracked_request_id).await;
     
     // Create response with headers
     let mut http_response = Json(response).into_response();

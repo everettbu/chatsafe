@@ -37,7 +37,6 @@ pub struct LlamaAdapter {
     template_config: TemplateConfig,
     runtime_config: RuntimeConfig,
     process_manager: crate::process_manager::ProcessManager,
-    client: Client,
     server_url: String,
     current_handle: Option<ModelHandle>,
     start_time: SystemTime,
@@ -52,7 +51,6 @@ impl LlamaAdapter {
         runtime_config: RuntimeConfig,
     ) -> Result<Self> {
         let server_url = format!("http://127.0.0.1:{}", runtime_config.llama_server_port);
-        let client = Self::create_default_client()?;
         
         Ok(Self {
             model_path,
@@ -60,7 +58,6 @@ impl LlamaAdapter {
             template_config,
             runtime_config,
             process_manager: crate::process_manager::ProcessManager::new("llama-server".to_string()),
-            client,
             server_url,
             current_handle: None,
             start_time: SystemTime::now(),
@@ -107,7 +104,7 @@ impl LlamaAdapter {
         
         // Use lsof to find processes listening on our port
         let output = Command::new("lsof")
-            .args(&["-ti", &format!(":{}", port)])
+            .args(["-ti", &format!(":{}", port)])
             .output()
             .await;
         
@@ -120,7 +117,7 @@ impl LlamaAdapter {
                         
                         // Kill the process (TODO: try SIGTERM first, then SIGKILL)
                         let _ = Command::new("kill")
-                            .args(&[KILL_SIGNAL, &pid.to_string()])
+                            .args([KILL_SIGNAL, &pid.to_string()])
                             .output()
                             .await;
                     }
@@ -356,17 +353,17 @@ impl Runtime for LlamaAdapter {
             reqs.insert(request_id_arc.to_string(), cancel_tx);
         }
         
-        let stream = Self::create_generation_stream(
+        let stream = Self::create_generation_stream(StreamParams {
             request,
             url,
-            request_id_arc,
+            request_id: request_id_arc,
             model_id,
             template,
             stop_sequences,
             eos_token,
             active_reqs,
             cancel_rx,
-        );
+        });
         
         Ok(Box::pin(stream))
     }
@@ -427,23 +424,26 @@ impl Runtime for LlamaAdapter {
     }
 }
 
+/// Parameters for stream generation
+struct StreamParams {
+    request: CompletionRequest,
+    url: String,
+    request_id: Arc<String>,
+    model_id: Arc<String>,
+    template: Arc<TemplateConfig>,
+    stop_sequences: Arc<Vec<String>>,
+    eos_token: Arc<String>,
+    active_reqs: Arc<RwLock<std::collections::HashMap<String, oneshot::Sender<()>>>>,
+    cancel_rx: oneshot::Receiver<()>,
+}
+
 impl LlamaAdapter {
     /// Create the generation stream
-    fn create_generation_stream(
-        request: CompletionRequest,
-        url: String,
-        request_id: Arc<String>,
-        model_id: Arc<String>,
-        template: Arc<TemplateConfig>,
-        stop_sequences: Arc<Vec<String>>,
-        eos_token: Arc<String>,
-        active_reqs: Arc<RwLock<std::collections::HashMap<String, oneshot::Sender<()>>>>,
-        cancel_rx: oneshot::Receiver<()>,
-    ) -> impl Stream<Item = Result<StreamFrame>> + Send {
+    fn create_generation_stream(params: StreamParams) -> impl Stream<Item = Result<StreamFrame>> + Send {
         async_stream::stream! {
             // Track cleanup
-            let _cleanup = scopeguard::guard(active_reqs.clone(), |reqs| {
-                let id = request_id.to_string();
+            let _cleanup = scopeguard::guard(params.active_reqs.clone(), |reqs| {
+                let id = params.request_id.to_string();
                 tokio::spawn(async move {
                     let mut r = reqs.write().await;
                     r.remove(&id);
@@ -452,20 +452,19 @@ impl LlamaAdapter {
             
             // Send start frame immediately
             yield Ok(StreamFrame::Start {
-                id: request_id.to_string(),
-                model: model_id.to_string(),
+                id: params.request_id.to_string(),
+                model: params.model_id.to_string(),
                 role: Role::Assistant,
             });
             
             // Process the streaming response
             match Self::process_stream_response(
-                request,
-                url,
-                request_id.clone(),
-                template,
-                stop_sequences,
-                eos_token,
-                cancel_rx,
+                params.request,
+                params.url,
+                params.template,
+                params.stop_sequences,
+                params.eos_token,
+                params.cancel_rx,
             ).await {
                 Ok(result) => {
                     // Yield all frames from the processing
@@ -486,7 +485,6 @@ impl LlamaAdapter {
     async fn process_stream_response(
         request: CompletionRequest,
         url: String,
-        request_id: Arc<String>,
         template: Arc<TemplateConfig>,
         stop_sequences: Arc<Vec<String>>,
         eos_token: Arc<String>,
@@ -564,9 +562,7 @@ impl LlamaAdapter {
                 
                 // Parse SSE event
                 for line in event.lines() {
-                    if line.starts_with("data: ") {
-                        let data = &line[6..];
-                        
+                    if let Some(data) = line.strip_prefix("data: ") {
                         if let Some(chunk) = Self::parse_sse_chunk(data) {
                             if !chunk.content.is_empty() {
                                 accumulated.push_str(&chunk.content);

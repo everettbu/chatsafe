@@ -28,12 +28,12 @@ impl From<String> for Role {
     }
 }
 
-impl ToString for Role {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Role::System => "system".to_string(),
-            Role::User => "user".to_string(),
-            Role::Assistant => "assistant".to_string(),
+            Role::System => write!(f, "system"),
+            Role::User => write!(f, "user"),
+            Role::Assistant => write!(f, "assistant"),
         }
     }
 }
@@ -85,7 +85,7 @@ impl ChatCompletionRequest {
         
         // Validate temperature
         if let Some(temp) = self.temperature {
-            if temp < TEMPERATURE_MIN || temp > TEMPERATURE_MAX {
+            if !(TEMPERATURE_MIN..=TEMPERATURE_MAX).contains(&temp) {
                 return Err(Error::BadRequest(
                     format!("Temperature must be between {} and {}", TEMPERATURE_MIN, TEMPERATURE_MAX)
                 ));
@@ -94,7 +94,7 @@ impl ChatCompletionRequest {
         
         // Validate max_tokens
         if let Some(max_tokens) = self.max_tokens {
-            if max_tokens < MIN_TOKENS || max_tokens > MAX_TOKENS_LIMIT {
+            if !(MIN_TOKENS..=MAX_TOKENS_LIMIT).contains(&max_tokens) {
                 return Err(Error::BadRequest(
                     format!("max_tokens must be between {} and {}", MIN_TOKENS, MAX_TOKENS_LIMIT)
                 ));
@@ -103,7 +103,7 @@ impl ChatCompletionRequest {
         
         // Validate top_p
         if let Some(top_p) = self.top_p {
-            if top_p < TOP_P_MIN || top_p > TOP_P_MAX {
+            if !(TOP_P_MIN..=TOP_P_MAX).contains(&top_p) {
                 return Err(Error::BadRequest(
                     format!("top_p must be between {} and {}", TOP_P_MIN, TOP_P_MAX)
                 ));
@@ -119,7 +119,7 @@ impl ChatCompletionRequest {
         
         // Validate repeat_penalty
         if let Some(penalty) = self.repeat_penalty {
-            if penalty < 0.1 || penalty > 2.0 {
+            if !(0.1..=2.0).contains(&penalty) {
                 return Err(Error::BadRequest("repeat_penalty must be between 0.1 and 2.0".into()));
             }
         }

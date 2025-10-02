@@ -1,6 +1,5 @@
 use chatsafe_common::{Message, Role};
 use chatsafe_config::TemplateConfig;
-use std::fmt::Write;
 
 // Constants for template markers
 const TEMPLATE_MARKERS: &[&str] = &[
@@ -98,10 +97,9 @@ impl TemplateEngine {
         eos_token: &str,
     ) -> CleanedResponse {
         let mut cleaned = response.to_string();
-        let mut stopped_at: Option<String> = None;
         
         // First, detect and truncate at stop sequences
-        stopped_at = Self::truncate_at_stop_sequence(&mut cleaned, stop_sequences, eos_token);
+        let stopped_at = Self::truncate_at_stop_sequence(&mut cleaned, stop_sequences, eos_token);
         
         // Remove template prefixes/suffixes if they were echoed by the model
         Self::remove_template_echoes(&mut cleaned, template);
