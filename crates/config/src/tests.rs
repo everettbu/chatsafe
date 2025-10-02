@@ -123,12 +123,12 @@ mod tests {
     
     #[test]
     fn test_model_not_found() {
-        let registry = ModelRegistry::load_defaults().unwrap();
+        let registry = ModelRegistry::load_defaults().expect("Failed to load default registry");
         
         let result = registry.get_model("nonexistent-model");
         assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
+            result.expect_err("Expected error for nonexistent model"),
             chatsafe_common::Error::ModelNotFound(_)
         ));
     }
@@ -158,7 +158,7 @@ mod tests {
         
         let path = registry.get_model_path("llama-3.2-3b-instruct-q4_k_m")?;
         assert_eq!(
-            path.to_str().unwrap(),
+            path.to_str().expect("Path should be valid UTF-8"),
             "/custom/models/llama-3.2-3b-instruct-q4_k_m.gguf"
         );
         

@@ -4,7 +4,7 @@ use chatsafe_common::{Message, GenerationParams, Result, Error, StreamFrame, Rol
 use chatsafe_config::{ModelConfig, TemplateConfig, RuntimeConfig};
 use futures::Stream;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,7 +12,23 @@ use std::time::SystemTime;
 use tokio::process::Command;
 use tokio::sync::{RwLock, oneshot};
 use tokio::time::{sleep, Duration, timeout};
-use tracing::{info, warn, debug, error};
+use tracing::{info, warn};
+
+// Constants
+const HTTP_TIMEOUT_SECS: u64 = 300;
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
+const HEALTH_CHECK_TIMEOUT_SECS: u64 = 2;
+const HEALTH_CHECK_CONNECT_TIMEOUT_MS: u64 = 500;
+const PROCESS_KILL_WAIT_MS: u64 = 200;
+const SERVER_READY_MAX_ATTEMPTS: u32 = 60;
+const SERVER_READY_CHECK_INTERVAL_MS: u64 = 500;
+const PROCESS_START_WAIT_MS: u64 = 100;
+const MODEL_LOAD_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_PARALLEL_REQUESTS: &str = "4";
+const DEFAULT_N_PREDICT: &str = "-1";
+const LLAMA_SERVER_BINARY: &str = "./llama.cpp/build/bin/llama-server";
+const TOKEN_ESTIMATION_DIVISOR: usize = 4;
+const KILL_SIGNAL: &str = "-9";
 
 /// Adapter for llama.cpp server
 pub struct LlamaAdapter {
@@ -36,12 +52,7 @@ impl LlamaAdapter {
         runtime_config: RuntimeConfig,
     ) -> Result<Self> {
         let server_url = format!("http://127.0.0.1:{}", runtime_config.llama_server_port);
-        
-        let client = Client::builder()
-            .timeout(Duration::from_secs(300))
-            .connect_timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|e| Error::RuntimeError(format!("Failed to create HTTP client: {}", e)))?;
+        let client = Self::create_default_client()?;
         
         Ok(Self {
             model_path,
@@ -57,18 +68,26 @@ impl LlamaAdapter {
         })
     }
     
-    fn build_prompt(&self, messages: &[Message]) -> String {
-        TemplateEngine::format_prompt(messages, &self.template_config)
+    /// Create a default HTTP client with standard timeouts
+    fn create_default_client() -> Result<Client> {
+        Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| Error::RuntimeError(format!("Failed to create HTTP client: {}", e)))
     }
     
-    fn clean_response(&self, response: &str) -> String {
-        let cleaned = TemplateEngine::clean_response(
-            response,
-            &self.template_config,
-            &self.model_config.stop_sequences,
-            &self.model_config.eos_token,
-        );
-        cleaned.content
+    /// Create a health check client with short timeouts
+    fn create_health_check_client() -> Result<Client> {
+        Client::builder()
+            .timeout(Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_millis(HEALTH_CHECK_CONNECT_TIMEOUT_MS))
+            .build()
+            .map_err(|e| Error::RuntimeError(format!("Failed to create health check client: {}", e)))
+    }
+    
+    fn build_prompt(&self, messages: &[Message]) -> String {
+        TemplateEngine::format_prompt(messages, &self.template_config)
     }
     
     /// Clean up any existing llama-server process
@@ -99,16 +118,16 @@ impl LlamaAdapter {
                     if let Ok(pid) = pid_str.trim().parse::<i32>() {
                         warn!("Found orphaned process {} on port {}, killing it", pid, port);
                         
-                        // Kill the process
+                        // Kill the process (TODO: try SIGTERM first, then SIGKILL)
                         let _ = Command::new("kill")
-                            .args(&["-9", &pid.to_string()])
+                            .args(&[KILL_SIGNAL, &pid.to_string()])
                             .output()
                             .await;
                     }
                 }
                 
                 // Give processes time to die
-                sleep(Duration::from_millis(200)).await;
+                sleep(Duration::from_millis(PROCESS_KILL_WAIT_MS)).await;
             }
         }
         
@@ -120,32 +139,14 @@ impl LlamaAdapter {
         let port = self.runtime_config.llama_server_port;
         
         // Try to connect to the port
-        match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
-            Ok(_) => {
-                // Port is in use
-                false
-            }
-            Err(_) => {
-                // Port is available (connection refused)
-                true
-            }
-        }
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .is_err()
     }
     
     /// Wait for the server to become ready
     async fn wait_for_ready(&mut self) -> Result<()> {
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 60;
-        
-        loop {
-            attempts += 1;
-            
-            if attempts > MAX_ATTEMPTS {
-                return Err(Error::RuntimeError(
-                    format!("Server failed to become ready after {} attempts", MAX_ATTEMPTS)
-                ));
-            }
-            
+        for attempts in 1..=SERVER_READY_MAX_ATTEMPTS {
             // Check if the process is still alive
             if !self.process_manager.is_running() {
                 return Err(Error::RuntimeError(
@@ -161,9 +162,81 @@ impl LlamaAdapter {
                 }
             }
             
-            sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(SERVER_READY_CHECK_INTERVAL_MS)).await;
+        }
+        
+        Err(Error::RuntimeError(
+            format!("Server failed to become ready after {} attempts", SERVER_READY_MAX_ATTEMPTS)
+        ))
+    }
+    
+    /// Build the llama-server command with all arguments
+    fn build_server_command(&self) -> Command {
+        let mut cmd = Command::new(LLAMA_SERVER_BINARY);
+        cmd.arg("--model").arg(&self.model_path)
+           .arg("--ctx-size").arg(self.model_config.ctx_window.to_string())
+           .arg("--n-gpu-layers").arg(self.model_config.resources.gpu_layers.to_string())
+           .arg("--host").arg("127.0.0.1")
+           .arg("--port").arg(self.runtime_config.llama_server_port.to_string())
+           .arg("--threads").arg(self.model_config.resources.threads.to_string())
+           .arg("--n-predict").arg(DEFAULT_N_PREDICT)
+           .arg("--parallel").arg(DEFAULT_PARALLEL_REQUESTS)
+           .arg("--cont-batching")
+           .arg("--flash-attn").arg("on");
+        cmd
+    }
+    
+    /// Handle cleanup after startup failure
+    async fn cleanup_after_failure(&mut self, context: &str) {
+        if let Err(e) = self.cleanup_existing_process().await {
+            warn!("Failed to cleanup after {}: {}", context, e);
         }
     }
+    
+    /// Process SSE chunk and extract content
+    fn parse_sse_chunk(data: &str) -> Option<StreamChunk> {
+        serde_json::from_str::<StreamChunk>(data).ok()
+    }
+    
+    /// Clean streaming content by removing markers
+    fn clean_streaming_content(content: &str) -> String {
+        let markers = ["<|eot_id|>", "<|end_of_text|>", "<|start_header_id|>", "<|end_header_id|>"];
+        let mut cleaned = content.to_string();
+        for marker in &markers {
+            cleaned = cleaned.replace(marker, "");
+        }
+        cleaned
+    }
+    
+    /// Check for role pollution in accumulated content
+    fn has_role_pollution(content: &str) -> bool {
+        content.contains("AI:") && content.contains("You:")
+    }
+    
+    /// Estimate token count from text
+    fn estimate_tokens(text: &str) -> usize {
+        text.len() / TOKEN_ESTIMATION_DIVISOR
+    }
+}
+
+/// SSE stream chunk structure
+#[derive(Deserialize, Debug)]
+struct StreamChunk {
+    content: String,
+    stop: bool,
+}
+
+/// Completion request for llama.cpp server
+#[derive(serde::Serialize)]
+struct CompletionRequest {
+    prompt: String,
+    n_predict: usize,
+    temperature: f32,
+    top_p: f32,
+    top_k: i32,
+    repeat_penalty: f32,
+    stop: Vec<String>,
+    stream: bool,
 }
 
 #[async_trait]
@@ -192,34 +265,27 @@ impl Runtime for LlamaAdapter {
         }
         
         // Start llama.cpp server using ProcessManager
-        let mut cmd = Command::new("./llama.cpp/build/bin/llama-server");
-        cmd.arg("--model").arg(&self.model_path)
-           .arg("--ctx-size").arg(self.model_config.ctx_window.to_string())
-           .arg("--n-gpu-layers").arg(self.model_config.resources.gpu_layers.to_string())
-           .arg("--host").arg("127.0.0.1")
-           .arg("--port").arg(self.runtime_config.llama_server_port.to_string())
-           .arg("--threads").arg(self.model_config.resources.threads.to_string())
-           .arg("--n-predict").arg("-1")
-           .arg("--parallel").arg("4")
-           .arg("--cont-batching")
-           .arg("--flash-attn").arg("on");
+        let cmd = self.build_server_command();
         
         // Spawn with proper stdout/stderr draining
         self.process_manager.spawn(cmd).await
             .map_err(|e| Error::RuntimeError(format!("Failed to start llama.cpp server: {}", e)))?;
         
         // Check if process started successfully
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(PROCESS_START_WAIT_MS)).await;
         if !self.process_manager.is_running() {
             return Err(Error::RuntimeError(
-                "llama-server exited immediately. Check if binary exists at ./llama.cpp/build/bin/llama-server".to_string()
+                format!("llama-server exited immediately. Check if binary exists at {}", LLAMA_SERVER_BINARY)
             ));
         }
         
         info!("llama-server process started successfully");
         
         // Wait for server to be ready with timeout
-        let wait_result = timeout(Duration::from_secs(30), self.wait_for_ready()).await;
+        let wait_result = timeout(
+            Duration::from_secs(MODEL_LOAD_TIMEOUT_SECS), 
+            self.wait_for_ready()
+        ).await;
         
         match wait_result {
             Ok(Ok(())) => {
@@ -233,17 +299,11 @@ impl Runtime for LlamaAdapter {
                 Ok(handle)
             }
             Ok(Err(e)) => {
-                // Clean up the failed process
-                if let Err(cleanup_err) = self.cleanup_existing_process().await {
-                    error!("Failed to cleanup after startup failure: {}", cleanup_err);
-                }
+                self.cleanup_after_failure("startup failure").await;
                 Err(e)
             }
             Err(_) => {
-                // Timeout - clean up the process
-                if let Err(cleanup_err) = self.cleanup_existing_process().await {
-                    error!("Failed to cleanup after timeout: {}", cleanup_err);
-                }
+                self.cleanup_after_failure("timeout").await;
                 Err(Error::RuntimeError("Timeout waiting for model to load".into()))
             }
         }
@@ -267,18 +327,6 @@ impl Runtime for LlamaAdapter {
         let prompt = self.build_prompt(&messages);
         let request_id = params.request_id.clone();
         
-        #[derive(Serialize)]
-        struct CompletionRequest {
-            prompt: String,
-            n_predict: usize,
-            temperature: f32,
-            top_p: f32,
-            top_k: i32,
-            repeat_penalty: f32,
-            stop: Vec<String>,
-            stream: bool,
-        }
-        
         let request = CompletionRequest {
             prompt,
             n_predict: params.max_tokens,
@@ -291,7 +339,7 @@ impl Runtime for LlamaAdapter {
         };
         
         let url = format!("{}/completion", self.server_url);
-        // Use references where possible, Arc for values moved into async block
+        // Use Arc for values moved into async block
         let template = Arc::new(self.template_config.clone());
         let stop_sequences = Arc::new(self.model_config.stop_sequences.clone());
         let eos_token = Arc::new(self.model_config.eos_token.clone());
@@ -308,209 +356,17 @@ impl Runtime for LlamaAdapter {
             reqs.insert(request_id_arc.to_string(), cancel_tx);
         }
         
-        let stream = async_stream::stream! {
-            // Track cleanup
-            let _cleanup = scopeguard::guard((), |_| {
-                let reqs = active_reqs.clone();
-                let id = request_id_arc.to_string();
-                tokio::spawn(async move {
-                    let mut r = reqs.write().await;
-                    r.remove(&id);
-                });
-            });
-            
-            // Send start frame immediately
-            yield Ok(StreamFrame::Start {
-                id: request_id_arc.to_string(),
-                model: model_id.to_string(),
-                role: Role::Assistant,
-            });
-            
-            // Build streaming request with no timeout for SSE
-            let client = match reqwest::Client::builder()
-                .timeout(Duration::from_secs(300)) // Long timeout for streaming
-                .build()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    yield Ok(StreamFrame::Error {
-                        message: format!("Failed to create HTTP client: {}", e),
-                    });
-                    return;
-                }
-            };
-            
-            let request_json = match serde_json::to_string(&request) {
-                Ok(json) => json,
-                Err(e) => {
-                    yield Ok(StreamFrame::Error {
-                        message: format!("Failed to serialize request: {}", e),
-                    });
-                    return;
-                }
-            };
-            
-            // Make request with cancellation support
-            let response_future = client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .body(request_json)
-                .send();
-            
-            // Race between response and cancellation
-            let response = tokio::select! {
-                resp = response_future => resp,
-                _ = cancel_rx => {
-                    yield Ok(StreamFrame::Error {
-                        message: "Request cancelled".to_string(),
-                    });
-                    return;
-                }
-            };
-            
-            match response {
-                Ok(response) => {
-                    if response.status().is_success() {
-                        use futures::StreamExt;
-                        
-                        let mut bytes_stream = response.bytes_stream();
-                        let mut buffer = Vec::new();
-                        let mut accumulated = String::new();
-                        let mut token_count = 0;
-                        let mut first_token_time: Option<std::time::Instant> = None;
-                        
-                        while let Some(chunk_result) = bytes_stream.next().await {
-                            match chunk_result {
-                                Ok(bytes) => {
-                                    buffer.extend_from_slice(&bytes);
-                                    
-                                    // Process SSE lines immediately for low latency
-                                    while let Some(newline_pos) = buffer.windows(2).position(|w| w == b"\n\n") {
-                                        let event_bytes = buffer.drain(..newline_pos + 2).collect::<Vec<_>>();
-                                        let event = String::from_utf8_lossy(&event_bytes);
-                                        
-                                        // Parse SSE event
-                                        for line in event.lines() {
-                                            if line.starts_with("data: ") {
-                                                let data = &line[6..];
-                                                
-                                                // Try to parse the JSON payload
-                                                #[derive(Deserialize, Debug)]
-                                                struct StreamChunk {
-                                                    content: String,
-                                                    stop: bool,
-                                                    #[serde(default)]
-                                                    generation_settings: Option<serde_json::Value>,
-                                                    #[serde(default)]
-                                                    timings: Option<serde_json::Value>,
-                                                }
-                                                
-                                                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                                                    if !chunk.content.is_empty() {
-                                                        // Track timing
-                                                        if first_token_time.is_none() {
-                                                            first_token_time = Some(std::time::Instant::now());
-                                                            debug!("First token received after start");
-                                                        }
-                                                        
-                                                        // Buffer for streaming with role pollution detection
-                                                        let prev_len = accumulated.len();
-                                                        accumulated.push_str(&chunk.content);
-                                                        token_count += 1;
-                                                        
-                                                        // Check if we've accumulated potential role pollution
-                                                        if accumulated.contains("AI:") && accumulated.contains("You:") {
-                                                            // This is role pollution
-                                                            if !accumulated.contains("I understand you'd like me to respond") {
-                                                                // Clear any previous content we sent
-                                                                // and send replacement message
-                                                                let replacement = "I understand you'd like me to respond, but I should avoid role-playing conversations. How can I help you directly?";
-                                                                
-                                                                // If this is the first detection, send the replacement
-                                                                yield Ok(StreamFrame::Delta {
-                                                                    content: replacement.to_string(),
-                                                                });
-                                                                // Stop processing
-                                                                break;
-                                                            }
-                                                        } else {
-                                                            // No pollution detected yet, send the new content
-                                                            // Use the template engine to process just the new chunk
-                                                            let new_content = &accumulated[prev_len..];
-                                                            
-                                                            // Basic cleaning for streaming (remove obvious markers)
-                                                            let mut cleaned = new_content.to_string();
-                                                            for marker in &["<|eot_id|>", "<|end_of_text|>", "<|start_header_id|>", "<|end_header_id|>"] {
-                                                                cleaned = cleaned.replace(marker, "");
-                                                            }
-                                                            
-                                                            // Send cleaned chunk
-                                                            if !cleaned.trim().is_empty() {
-                                                                yield Ok(StreamFrame::Delta {
-                                                                    content: cleaned,
-                                                                });
-                                                            }
-                                                        }
-                                                    }
-                                                    
-                                                    if chunk.stop {
-                                                        debug!("Generation complete, {} tokens", token_count);
-                                                        
-                                                        // Final cleanup of accumulated content
-                                                        let final_cleaned = TemplateEngine::clean_response(
-                                                            &accumulated,
-                                                            &template,
-                                                            &stop_sequences,
-                                                            &eos_token,
-                                                        );
-                                                        
-                                                        // If we stripped something at the end, send correction
-                                                        if final_cleaned.stopped_at.is_some() {
-                                                            yield Ok(StreamFrame::Delta {
-                                                                content: "\n".to_string(), // Ensure clean ending
-                                                            });
-                                                        }
-                                                        
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("Stream read error: {}", e);
-                                    yield Ok(StreamFrame::Error {
-                                        message: format!("Stream error: {}", e),
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // Send done frame with usage stats
-                        yield Ok(StreamFrame::Done {
-                            finish_reason: FinishReason::Stop,
-                            usage: Usage {
-                                prompt_tokens: request.prompt.len() / 4, // Rough estimate
-                                completion_tokens: token_count,
-                                total_tokens: (request.prompt.len() / 4) + token_count,
-                            },
-                        });
-                    } else {
-                        yield Ok(StreamFrame::Error {
-                            message: format!("Server error: {}", response.status()),
-                        });
-                    }
-                }
-                Err(e) => {
-                    yield Ok(StreamFrame::Error {
-                        message: format!("Request failed: {}", e),
-                    });
-                }
-            }
-        };
+        let stream = Self::create_generation_stream(
+            request,
+            url,
+            request_id_arc,
+            model_id,
+            template,
+            stop_sequences,
+            eos_token,
+            active_reqs,
+            cancel_rx,
+        );
         
         Ok(Box::pin(stream))
     }
@@ -528,13 +384,7 @@ impl Runtime for LlamaAdapter {
     
     async fn health(&self) -> Result<RuntimeHealth> {
         let url = format!("{}/health", self.server_url);
-        
-        // Create a client with 2-second timeout specifically for health checks
-        let health_client = Client::builder()
-            .timeout(Duration::from_secs(2))
-            .connect_timeout(Duration::from_millis(500))
-            .build()
-            .map_err(|e| Error::RuntimeError(format!("Failed to create health check client: {}", e)))?;
+        let health_client = Self::create_health_check_client()?;
         
         let is_healthy = match health_client.get(&url).send().await {
             Ok(response) => response.status().is_success(),
@@ -568,11 +418,212 @@ impl Runtime for LlamaAdapter {
         self.current_handle = None;
         
         // Double-check port is released
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(PROCESS_START_WAIT_MS)).await;
         if !self.is_port_available().await {
             warn!("Port {} still in use after shutdown", self.runtime_config.llama_server_port);
         }
         
         Ok(())
+    }
+}
+
+impl LlamaAdapter {
+    /// Create the generation stream
+    fn create_generation_stream(
+        request: CompletionRequest,
+        url: String,
+        request_id: Arc<String>,
+        model_id: Arc<String>,
+        template: Arc<TemplateConfig>,
+        stop_sequences: Arc<Vec<String>>,
+        eos_token: Arc<String>,
+        active_reqs: Arc<RwLock<std::collections::HashMap<String, oneshot::Sender<()>>>>,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> impl Stream<Item = Result<StreamFrame>> + Send {
+        async_stream::stream! {
+            // Track cleanup
+            let _cleanup = scopeguard::guard(active_reqs.clone(), |reqs| {
+                let id = request_id.to_string();
+                tokio::spawn(async move {
+                    let mut r = reqs.write().await;
+                    r.remove(&id);
+                });
+            });
+            
+            // Send start frame immediately
+            yield Ok(StreamFrame::Start {
+                id: request_id.to_string(),
+                model: model_id.to_string(),
+                role: Role::Assistant,
+            });
+            
+            // Process the streaming response
+            match Self::process_stream_response(
+                request,
+                url,
+                request_id.clone(),
+                template,
+                stop_sequences,
+                eos_token,
+                cancel_rx,
+            ).await {
+                Ok(result) => {
+                    // Yield all frames from the processing
+                    for frame in result {
+                        yield Ok(frame);
+                    }
+                }
+                Err(e) => {
+                    yield Ok(StreamFrame::Error {
+                        message: e.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    
+    /// Process the streaming response from llama.cpp server
+    async fn process_stream_response(
+        request: CompletionRequest,
+        url: String,
+        request_id: Arc<String>,
+        template: Arc<TemplateConfig>,
+        stop_sequences: Arc<Vec<String>>,
+        eos_token: Arc<String>,
+        mut cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<Vec<StreamFrame>> {
+        let mut frames = Vec::new();
+        
+        // Build streaming request
+        let client = Self::create_default_client()?;
+        
+        let request_json = serde_json::to_string(&request)
+            .map_err(|e| Error::RuntimeError(format!("Failed to serialize request: {}", e)))?;
+        
+        // Make request with cancellation support
+        let response_future = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .body(request_json)
+            .send();
+        
+        // Race between response and cancellation
+        let response = tokio::select! {
+            resp = response_future => resp,
+            _ = &mut cancel_rx => {
+                return Ok(vec![StreamFrame::Error {
+                    message: "Request cancelled".to_string(),
+                }]);
+            }
+        };
+        
+        let response = response
+            .map_err(|e| Error::RuntimeError(format!("Request failed: {}", e)))?;
+        
+        if !response.status().is_success() {
+            return Ok(vec![StreamFrame::Error {
+                message: format!("Server error: {}", response.status()),
+            }]);
+        }
+        
+        // Process SSE stream
+        frames.extend(
+            Self::process_sse_stream(response, template, stop_sequences, eos_token, request.prompt).await?
+        );
+        
+        Ok(frames)
+    }
+    
+    /// Process SSE event stream
+    async fn process_sse_stream(
+        response: reqwest::Response,
+        template: Arc<TemplateConfig>,
+        stop_sequences: Arc<Vec<String>>,
+        eos_token: Arc<String>,
+        prompt: String,
+    ) -> Result<Vec<StreamFrame>> {
+        use futures::StreamExt;
+        
+        let mut frames = Vec::new();
+        let mut bytes_stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut accumulated = String::new();
+        let mut token_count = 0;
+        
+        while let Some(chunk_result) = bytes_stream.next().await {
+            let bytes = chunk_result
+                .map_err(|e| Error::RuntimeError(format!("Stream error: {}", e)))?;
+            
+            buffer.extend_from_slice(&bytes);
+            
+            // Process SSE lines
+            while let Some(newline_pos) = buffer.windows(2).position(|w| w == b"\n\n") {
+                let event_bytes = buffer.drain(..newline_pos + 2).collect::<Vec<_>>();
+                let event = String::from_utf8_lossy(&event_bytes);
+                
+                // Parse SSE event
+                for line in event.lines() {
+                    if line.starts_with("data: ") {
+                        let data = &line[6..];
+                        
+                        if let Some(chunk) = Self::parse_sse_chunk(data) {
+                            if !chunk.content.is_empty() {
+                                accumulated.push_str(&chunk.content);
+                                token_count += 1;
+                                
+                                // Check for role pollution
+                                if Self::has_role_pollution(&accumulated) {
+                                    if !accumulated.contains("I understand you'd like me to respond") {
+                                        frames.push(StreamFrame::Delta {
+                                            content: "I understand you'd like me to respond, but I should avoid role-playing conversations. How can I help you directly?".to_string(),
+                                        });
+                                        break;
+                                    }
+                                } else {
+                                    // Clean and send the chunk
+                                    let cleaned = Self::clean_streaming_content(&chunk.content);
+                                    if !cleaned.trim().is_empty() {
+                                        frames.push(StreamFrame::Delta {
+                                            content: cleaned,
+                                        });
+                                    }
+                                }
+                            }
+                            
+                            if chunk.stop {
+                                // Final cleanup
+                                let final_cleaned = TemplateEngine::clean_response(
+                                    &accumulated,
+                                    &template,
+                                    &stop_sequences,
+                                    &eos_token,
+                                );
+                                
+                                if final_cleaned.stopped_at.is_some() {
+                                    frames.push(StreamFrame::Delta {
+                                        content: "\n".to_string(),
+                                    });
+                                }
+                                
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Send done frame with usage stats
+        frames.push(StreamFrame::Done {
+            finish_reason: FinishReason::Stop,
+            usage: Usage {
+                prompt_tokens: Self::estimate_tokens(&prompt),
+                completion_tokens: token_count,
+                total_tokens: Self::estimate_tokens(&prompt) + token_count,
+            },
+        });
+        
+        Ok(frames)
     }
 }

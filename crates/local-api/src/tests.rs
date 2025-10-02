@@ -139,7 +139,7 @@ mod tests {
             uptime_seconds: 3600,
         };
 
-        let json = serde_json::to_value(&health).unwrap();
+        let json = serde_json::to_value(&health).expect("Failed to serialize health response");
         
         assert_eq!(json["status"], "healthy");
         assert_eq!(json["model_loaded"], true);
@@ -154,7 +154,7 @@ mod tests {
             content: "You are helpful".to_string(),
         };
 
-        let json = serde_json::to_value(&msg).unwrap();
+        let json = serde_json::to_value(&msg).expect("Failed to serialize message");
         assert_eq!(json["role"], "system");
 
         let msg = Message {
@@ -162,7 +162,7 @@ mod tests {
             content: "Hello".to_string(),
         };
 
-        let json = serde_json::to_value(&msg).unwrap();
+        let json = serde_json::to_value(&msg).expect("Failed to serialize message");
         assert_eq!(json["role"], "user");
 
         let msg = Message {
@@ -170,7 +170,7 @@ mod tests {
             content: "Hi there".to_string(),
         };
 
-        let json = serde_json::to_value(&msg).unwrap();
+        let json = serde_json::to_value(&msg).expect("Failed to serialize message");
         assert_eq!(json["role"], "assistant");
     }
 
@@ -185,7 +185,7 @@ mod tests {
             "stream": true
         });
 
-        let request: ChatCompletionRequest = serde_json::from_value(json).unwrap();
+        let request: ChatCompletionRequest = serde_json::from_value(json).expect("Failed to deserialize request");
         
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].content, "Hello");
@@ -258,6 +258,6 @@ mod tests {
         };
 
         assert!(request.model.is_some());
-        assert_eq!(request.model.unwrap(), "llama-3.2-3b-instruct-q4_k_m");
+        assert_eq!(request.model.expect("Model should be present"), "llama-3.2-3b-instruct-q4_k_m");
     }
 }

@@ -6,31 +6,36 @@ mod streaming;
 mod tests;
 use axum::{
     extract::{State, ConnectInfo},
-    response::{sse::Event, IntoResponse, Sse},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
-    middleware,
+    http::{HeaderValue, StatusCode},
 };
 use chatsafe_common::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk,
-    Message, Choice, StreamChoice, DeltaContent, Usage, Role, FinishReason,
+    ChatCompletionRequest, ChatCompletionResponse,
+    Message, Choice, Usage, Role, FinishReason,
     HealthResponse, HealthStatus, GenerationParams, StreamFrame,
     Error as CommonError, ErrorResponse, ObservableMetrics, RequestId,
     ObservableMetricsSnapshot,
 };
-use chatsafe_config::{ConfigLoader, ModelRegistry, AppConfig};
+use chatsafe_config::{ConfigLoader, ModelRegistry};
 use chatsafe_runtime::{RuntimeHandle, ModelRuntime, ModelHandle};
-use futures::stream::Stream;
 use futures::StreamExt;
 use serde_json::json;
-use std::{convert::Infallible, net::{SocketAddr, IpAddr}, sync::Arc, path::PathBuf};
+use std::{net::SocketAddr, sync::Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tokio_stream as stream;
 use tower_http::trace::TraceLayer;
 use rate_limiter::{RateLimiter, RateLimiterConfig};
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+// Constants
+const API_VERSION: &str = "0.1.0";
+const HEALTH_CHECK_TIMEOUT_SECS: u64 = 2;
+const REQUEST_ID_HEADER: &str = "x-request-id";
+const DEFAULT_MODEL_NAME: &str = "unknown";
+const CHAT_COMPLETION_OBJECT: &str = "chat.completion";
 
 #[derive(Clone)]
 struct AppState {
@@ -42,10 +47,46 @@ struct AppState {
     rate_limiter: RateLimiter,
 }
 
+// Helper function to create error response with request ID
+fn create_error_response(
+    error: &CommonError,
+    request_id: &RequestId,
+    status: StatusCode,
+) -> Response {
+    let mut error_response = ErrorResponse::from(error);
+    error_response.request_id = Some(request_id.to_string());
+    
+    (
+        status,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                axum::http::HeaderName::from_static(REQUEST_ID_HEADER),
+                HeaderValue::from_str(&request_id.to_string())
+                    .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_MODEL_NAME)),
+            ),
+        ],
+        Json(error_response),
+    )
+        .into_response()
+}
+
+// Helper to add request ID header to response
+fn add_request_id_header(response: &mut Response, request_id: &RequestId) {
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static(REQUEST_ID_HEADER),
+        HeaderValue::from_str(&request_id.to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_MODEL_NAME)),
+    );
+}
+
 async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    // Apply 2-second timeout to health check
+    // Apply timeout to health check
     let health_future = state.runtime.health();
-    let timeout_duration = Duration::from_secs(2);
+    let timeout_duration = Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS);
     
     let health = match tokio::time::timeout(timeout_duration, health_future).await {
         Ok(Ok(health)) => health,
@@ -71,57 +112,196 @@ async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
             HealthStatus::Unhealthy 
         },
         model_loaded: health.model_loaded.is_some(),
-        version: "0.1.0".to_string(),
+        version: API_VERSION.to_string(),
         uptime_seconds: uptime,
     })
+}
+
+// Handle streaming response
+async fn handle_streaming(
+    state: &AppState,
+    handle: &ModelHandle,
+    messages: Vec<Message>,
+    params: GenerationParams,
+    request_id: &RequestId,
+    tracked_request_id: &RequestId,
+    ip: std::net::IpAddr,
+) -> Result<Response, Response> {
+    let model_id = handle.model_id.to_string();
+    
+    let stream = state.runtime.generate(handle, messages, params)
+        .await
+        .map_err(|e| {
+            let response = create_error_response(&e, &request_id, StatusCode::INTERNAL_SERVER_ERROR);
+            
+            // Complete request tracking on error
+            let metrics = Arc::clone(&state.metrics);
+            let req_id = request_id.clone();
+            let tracked_id = tracked_request_id.clone();
+            tokio::spawn(async move {
+                metrics.record_error(Some(&req_id), &e).await;
+                metrics.complete_request(&tracked_id).await;
+            });
+            
+            response
+        })?;
+    
+    // Request completion is handled by streaming module's CleanupGuard
+    let mut response = streaming::streaming_response_with_observability(
+        stream,
+        model_id,
+        Arc::clone(&state.metrics),
+        state.rate_limiter.clone(),
+        ip,
+        tracked_request_id.clone(),
+    ).into_response();
+    
+    add_request_id_header(&mut response, request_id);
+    Ok(response)
+}
+
+// Handle non-streaming response
+async fn handle_non_streaming(
+    state: &AppState,
+    handle: &ModelHandle,
+    messages: Vec<Message>,
+    params: GenerationParams,
+    request_id: &RequestId,
+    tracked_request_id: &RequestId,
+    ip: std::net::IpAddr,
+) -> Result<Response, Response> {
+    let model_id = handle.model_id.to_string();
+    
+    let mut stream = state.runtime.generate(handle, messages, params.clone())
+        .await
+        .map_err(|e| {
+            let response = create_error_response(&e, &request_id, StatusCode::INTERNAL_SERVER_ERROR);
+            
+            // Complete request tracking on error
+            let metrics = Arc::clone(&state.metrics);
+            let req_id = request_id.clone();
+            let tracked_id = tracked_request_id.clone();
+            tokio::spawn(async move {
+                metrics.record_error(Some(&req_id), &e).await;
+                metrics.complete_request(&tracked_id).await;
+            });
+            
+            response
+        })?;
+    
+    // Collect all frames
+    let mut content = String::new();
+    let mut usage = Usage::default();
+    let mut finish_reason = FinishReason::Stop;
+    
+    while let Some(frame) = stream.next().await {
+        match frame {
+            Ok(StreamFrame::Delta { content: delta }) => {
+                content.push_str(&delta);
+            }
+            Ok(StreamFrame::Done { finish_reason: reason, usage: u }) => {
+                finish_reason = reason;
+                usage = u;
+            }
+            Ok(StreamFrame::Error { message }) => {
+                // Complete request tracking on error
+                state.rate_limiter.release_request(ip).await;
+                
+                let err = CommonError::RuntimeError(message);
+                state.metrics.record_error(Some(request_id), &err).await;
+                state.metrics.complete_request(&tracked_request_id).await;
+                
+                return Err(create_error_response(&err, request_id, StatusCode::INTERNAL_SERVER_ERROR));
+            }
+            _ => {}
+        }
+    }
+    
+    // Create response
+    let response = ChatCompletionResponse {
+        id: params.request_id,
+        object: CHAT_COMPLETION_OBJECT.to_string(),
+        created: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+        model: model_id,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content,
+            },
+            finish_reason: Some(finish_reason),
+        }],
+        usage,
+    };
+    
+    // Release rate limit for non-streaming requests
+    state.rate_limiter.release_request(ip).await;
+    
+    // Complete request tracking
+    state.metrics.complete_request(&tracked_request_id).await;
+    
+    // Create response with headers
+    let mut http_response = Json(response).into_response();
+    add_request_id_header(&mut http_response, request_id);
+    
+    Ok(http_response)
 }
 
 async fn chat_completion(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(request): Json<ChatCompletionRequest>,
-) -> Result<impl IntoResponse, (axum::http::StatusCode, Json<ErrorResponse>)> {
-    let start_time = std::time::Instant::now();
+) -> Result<Response, Response> {
     let ip = addr.ip();
     
     // Generate request ID for tracing
     let request_id = RequestId::new();
     
+    // Start tracking this request early for all paths
+    let is_streaming = request.stream.unwrap_or(true);
+    let model_name = request.model.clone().unwrap_or_else(|| String::from(DEFAULT_MODEL_NAME));
+    let tracked_request_id = state.metrics.start_request(
+        request_id.clone(),
+        model_name.clone(),
+        is_streaming
+    ).await;
+    
     // Check rate limit
     if let Err(e) = state.rate_limiter.check_rate_limit(ip).await {
         state.metrics.record_error(Some(&request_id), &e).await;
         state.metrics.record_rate_limit(ip.to_string()).await;
+        state.metrics.complete_request(&tracked_request_id).await;
         
-        let mut response = ErrorResponse::from(&e);
-        response.request_id = Some(request_id.to_string());
-        
-        return Err((
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            Json(response),
-        ));
+        return Err(create_error_response(&e, &request_id, StatusCode::TOO_MANY_REQUESTS));
     }
     
     // Validate request
     if let Err(e) = request.validate() {
         state.metrics.record_error(Some(&request_id), &e).await;
+        state.metrics.complete_request(&tracked_request_id).await;
         
-        let mut response = ErrorResponse::from(&e);
-        response.request_id = Some(request_id.to_string());
-        
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(response),
-        ));
+        return Err(create_error_response(&e, &request_id, StatusCode::BAD_REQUEST));
     }
     
     // Get model handle
     let handle = state.model_handle.read().await.clone()
         .ok_or_else(|| {
             let err = CommonError::RuntimeNotReady;
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse::from(&err)),
-            )
+            let response = create_error_response(&err, &request_id, StatusCode::SERVICE_UNAVAILABLE);
+            
+            // Record error and complete request tracking
+            let metrics = Arc::clone(&state.metrics);
+            let req_id = request_id.clone();
+            let tracked_id = tracked_request_id.clone();
+            tokio::spawn(async move {
+                metrics.record_error(Some(&req_id), &err).await;
+                metrics.complete_request(&tracked_id).await;
+            });
+            
+            response
         })?;
     
     // Get model config and create params
@@ -134,134 +314,36 @@ async fn chat_completion(
         request.top_k,
         request.repeat_penalty,
     ).map_err(|e| {
-        // Record error in background
-        {
-            let metrics = state.metrics.clone();
-            let req_id = request_id.clone();
-            let error_type = CommonError::ConfigError(e.to_string());
-            tokio::spawn(async move {
-                metrics.record_error(Some(&req_id), &error_type).await;
-            });
-        }
+        let response = create_error_response(&e, &request_id, StatusCode::INTERNAL_SERVER_ERROR);
         
-        let mut response = ErrorResponse::from(&e);
-        response.request_id = Some(request_id.to_string());
+        // Record error and complete request
+        let metrics = Arc::clone(&state.metrics);
+        let req_id = request_id.clone();
+        let tracked_id = tracked_request_id.clone();
+        tokio::spawn(async move {
+            metrics.record_error(Some(&req_id), &e).await;
+            metrics.complete_request(&tracked_id).await;
+        });
         
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(response),
-        )
+        response
     })?;
     
     // Add request ID to params for tracing
     params.request_id = request_id.to_string();
     
-    // Start tracking this request
-    let is_streaming = request.stream.unwrap_or(true);
-    let tracked_request_id = state.metrics.start_request(
-        request_id.clone(),
-        model_id.to_string(),
-        is_streaming
-    ).await;
-    
     // Convert messages
     let messages: Vec<Message> = request.messages;
     
     if is_streaming {
-        // Streaming response
-        let stream = state.runtime.generate(&handle, messages, params)
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::from(&e)),
-                )
-            })?;
-        
-        // Request completion is handled by streaming module's CleanupGuard
-        
-        Ok(streaming::streaming_response_with_observability(
-            stream,
-            model_id.to_string(),
-            state.metrics.clone(),
-            state.rate_limiter.clone(),
-            ip,
-            tracked_request_id.clone()
-        ).into_response())
+        handle_streaming(&state, &handle, messages, params, &request_id, &tracked_request_id, ip).await
     } else {
-        // Non-streaming response
-        let mut stream = state.runtime.generate(&handle, messages, params.clone())
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::from(&e)),
-                )
-            })?;
-        
-        // Collect all frames
-        let mut content = String::new();
-        let mut usage = Usage::default();
-        let mut finish_reason = FinishReason::Stop;
-        
-        while let Some(frame) = stream.next().await {
-            match frame {
-                Ok(StreamFrame::Delta { content: delta }) => {
-                    content.push_str(&delta);
-                }
-                Ok(StreamFrame::Done { finish_reason: reason, usage: u }) => {
-                    finish_reason = reason;
-                    usage = u;
-                }
-                Ok(StreamFrame::Error { message }) => {
-                    return Err((
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::from(&CommonError::RuntimeError(message))),
-                    ));
-                }
-                _ => {}
-            }
-        }
-        
-        // Create response
-        let response = ChatCompletionResponse {
-            id: params.request_id,
-            object: "chat.completion".to_string(),
-            created: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_else(|_| Duration::from_secs(0))
-                .as_secs() as i64,
-            model: model_id.to_string(),
-            choices: vec![Choice {
-                index: 0,
-                message: Message {
-                    role: Role::Assistant,
-                    content,
-                },
-                finish_reason: Some(finish_reason),
-            }],
-            usage,
-        };
-        
-        // Release rate limit for non-streaming requests
-        state.rate_limiter.release_request(ip).await;
-        
-        // Complete request tracking
-        state.metrics.complete_request(&tracked_request_id).await;
-        
-        Ok(Json(response).into_response())
+        handle_non_streaming(&state, &handle, messages, params, &request_id, &tracked_request_id, ip).await
     }
 }
 
-// Old streaming_response removed - using streaming::streaming_response_with_observability
-
-// NOTE: The old streaming_response function has been removed.
-// All streaming is now handled via streaming::streaming_response_with_observability
-// which includes proper request tracking, backpressure, and observability.
-
 async fn version() -> Json<serde_json::Value> {
     Json(json!({
-        "version": "0.1.0",
+        "version": API_VERSION,
         "api": "ChatSafe Local API",
         "model_api": "OpenAI Compatible"
     }))

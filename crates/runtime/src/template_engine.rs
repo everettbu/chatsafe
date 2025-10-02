@@ -1,6 +1,26 @@
 use chatsafe_common::{Message, Role};
 use chatsafe_config::TemplateConfig;
-use std::collections::HashSet;
+use std::fmt::Write;
+
+// Constants for template markers
+const TEMPLATE_MARKERS: &[&str] = &[
+    "<|eot_id|>",
+    "<|end_of_text|>",
+    "<|start_header_id|>",
+    "<|end_header_id|>",
+    "<|im_end|>",
+    "<|im_start|>",
+];
+
+// Constants for role patterns
+const ROLE_PATTERNS: &[&str] = &[
+    "AI:", "You:", "User:", "Assistant:", "System:",
+    "Human:", "Bot:", "### Instruction:", "### Response:",
+];
+
+// Fallback messages
+const ROLE_POLLUTION_FALLBACK: &str = "I understand you'd like me to respond, but I should avoid role-playing conversations. How can I help you directly?";
+const EMPTY_RESPONSE_FALLBACK: &str = "I'm here to help. What would you like to know?";
 
 /// Template engine for formatting messages and cleaning responses
 pub struct TemplateEngine;
@@ -11,34 +31,46 @@ impl TemplateEngine {
         messages: &[Message],
         template: &TemplateConfig,
     ) -> String {
-        let mut prompt = String::new();
+        let mut prompt = String::with_capacity(1024); // Pre-allocate reasonable size
         let mut has_system = false;
         
         for message in messages {
             match message.role {
                 Role::System => {
                     has_system = true;
-                    prompt.push_str(&template.system_prefix);
-                    prompt.push_str(&message.content);
-                    prompt.push_str(&template.system_suffix);
+                    Self::write_message(
+                        &mut prompt,
+                        &template.system_prefix,
+                        &message.content,
+                        &template.system_suffix,
+                    );
                 }
                 Role::User => {
                     // Add default system prompt if not provided
                     if !has_system {
                         has_system = true;
-                        prompt.push_str(&template.system_prefix);
-                        prompt.push_str(&template.default_system_prompt);
-                        prompt.push_str(&template.system_suffix);
+                        Self::write_message(
+                            &mut prompt,
+                            &template.system_prefix,
+                            &template.default_system_prompt,
+                            &template.system_suffix,
+                        );
                     }
                     
-                    prompt.push_str(&template.user_prefix);
-                    prompt.push_str(&message.content);
-                    prompt.push_str(&template.user_suffix);
+                    Self::write_message(
+                        &mut prompt,
+                        &template.user_prefix,
+                        &message.content,
+                        &template.user_suffix,
+                    );
                 }
                 Role::Assistant => {
-                    prompt.push_str(&template.assistant_prefix);
-                    prompt.push_str(&message.content);
-                    prompt.push_str(&template.assistant_suffix);
+                    Self::write_message(
+                        &mut prompt,
+                        &template.assistant_prefix,
+                        &message.content,
+                        &template.assistant_suffix,
+                    );
                 }
             }
         }
@@ -47,6 +79,15 @@ impl TemplateEngine {
         prompt.push_str(&template.assistant_prefix);
         
         prompt
+    }
+    
+    /// Helper to write a message with prefix and suffix
+    fn write_message(prompt: &mut String, prefix: &str, content: &str, suffix: &str) {
+        // Pre-calculate capacity for better performance
+        prompt.reserve(prefix.len() + content.len() + suffix.len());
+        prompt.push_str(prefix);
+        prompt.push_str(content);
+        prompt.push_str(suffix);
     }
     
     /// Clean response by removing template markers and role pollution
@@ -60,40 +101,15 @@ impl TemplateEngine {
         let mut stopped_at: Option<String> = None;
         
         // First, detect and truncate at stop sequences
-        for stop_seq in stop_sequences.iter().chain(std::iter::once(&eos_token.to_string())) {
-            if let Some(pos) = cleaned.find(stop_seq.as_str()) {
-                cleaned.truncate(pos);
-                stopped_at = Some(stop_seq.clone());
-                break;
-            }
-        }
+        stopped_at = Self::truncate_at_stop_sequence(&mut cleaned, stop_sequences, eos_token);
         
         // Remove template prefixes/suffixes if they were echoed by the model
-        // This happens when the model includes its own role markers in the output
-        if !template.assistant_prefix.is_empty() && cleaned.starts_with(&template.assistant_prefix) {
-            cleaned = cleaned[template.assistant_prefix.len()..].to_string();
-        }
-        if !template.assistant_suffix.is_empty() && cleaned.ends_with(&template.assistant_suffix) {
-            cleaned = cleaned[..cleaned.len() - template.assistant_suffix.len()].to_string();
-        }
+        Self::remove_template_echoes(&mut cleaned, template);
         
-        // Remove any leaked template markers that shouldn't be in the output
-        let markers_to_remove = vec![
-            "<|eot_id|>",
-            "<|end_of_text|>",
-            "<|start_header_id|>",
-            "<|end_header_id|>",
-            "<|im_end|>",
-            "<|im_start|>",
-        ];
+        // Remove any leaked template markers
+        Self::remove_template_markers(&mut cleaned);
         
-        for marker in markers_to_remove {
-            if !marker.is_empty() {
-                cleaned = cleaned.replace(marker, "");
-            }
-        }
-        
-        // Remove role pollution (lines starting with role markers)
+        // Remove role pollution
         cleaned = Self::remove_role_pollution(&cleaned);
         
         // Final trim
@@ -105,58 +121,65 @@ impl TemplateEngine {
         }
     }
     
+    /// Truncate text at the first stop sequence found
+    fn truncate_at_stop_sequence(
+        text: &mut String,
+        stop_sequences: &[String],
+        eos_token: &str,
+    ) -> Option<String> {
+        // Check all stop sequences first, then eos_token - avoid creating string
+        for stop_seq in stop_sequences {
+            if let Some(pos) = text.find(stop_seq.as_str()) {
+                text.truncate(pos);
+                return Some(stop_seq.clone());
+            }
+        }
+        // Check eos_token without allocation
+        if let Some(pos) = text.find(eos_token) {
+            text.truncate(pos);
+            return Some(eos_token.to_string());
+        }
+        None
+    }
+    
+    /// Remove template prefixes/suffixes if echoed by model
+    fn remove_template_echoes(text: &mut String, template: &TemplateConfig) {
+        // This happens when the model includes its own role markers in the output
+        if !template.assistant_prefix.is_empty() && text.starts_with(&template.assistant_prefix) {
+            text.drain(..template.assistant_prefix.len());
+        }
+        if !template.assistant_suffix.is_empty() && text.ends_with(&template.assistant_suffix) {
+            let suffix_len = template.assistant_suffix.len();
+            let new_len = text.len() - suffix_len;
+            text.truncate(new_len);
+        }
+    }
+    
+    /// Remove leaked template markers
+    fn remove_template_markers(text: &mut String) {
+        // Only do replacement if markers are actually present (optimization)
+        for marker in TEMPLATE_MARKERS {
+            if !marker.is_empty() && text.contains(marker) {
+                *text = text.replace(marker, "");
+            }
+        }
+    }
+    
     /// Remove role pollution from response
     fn remove_role_pollution(text: &str) -> String {
-        // If the entire response looks like role-play output, reject it
-        if text.contains("AI:") && text.contains("You:") {
-            // This appears to be the model outputting a dialogue
-            // Return a generic response instead
-            return "I understand you'd like me to respond, but I should avoid role-playing conversations. How can I help you directly?".to_string();
+        // Quick check for dialogue pattern
+        if Self::has_dialogue_pattern(text) {
+            return ROLE_POLLUTION_FALLBACK.to_string();
         }
         
-        let role_patterns = vec![
-            "AI:", "You:", "User:", "Assistant:", "System:",
-            "Human:", "Bot:", "### Instruction:", "### Response:",
-        ];
-        
         let lines: Vec<&str> = text.lines().collect();
-        let mut cleaned_lines = Vec::new();
+        let mut cleaned_lines = Vec::with_capacity(lines.len());
         
         for line in lines {
-            let mut clean_line = line.to_string();
-            
-            // Check if line starts with any role pattern
-            for pattern in &role_patterns {
-                if line.trim_start().starts_with(pattern) {
-                    // If this is the ONLY content on the line after the role marker,
-                    // it might be the model trying to output a dialogue
-                    let remainder = line.trim_start()
-                        .trim_start_matches(pattern)
-                        .trim();
-                    
-                    // If there's actual content after the role marker, keep it
-                    if !remainder.is_empty() {
-                        clean_line = remainder.to_string();
-                    } else {
-                        // Empty after role marker, skip this line
-                        continue;
-                    }
-                    break;
+            if let Some(cleaned) = Self::clean_role_from_line(line) {
+                if !cleaned.is_empty() {
+                    cleaned_lines.push(cleaned);
                 }
-            }
-            
-            // Also check for role markers mid-line (less aggressive)
-            for pattern in &role_patterns {
-                if clean_line.contains(pattern) && !clean_line.starts_with(pattern) {
-                    // Only remove if it looks like an obvious role marker
-                    // (e.g., at the start of a sentence)
-                    clean_line = clean_line.replace(&format!("\n{}", pattern), "\n");
-                    clean_line = clean_line.replace(&format!(". {}", pattern), ". ");
-                }
-            }
-            
-            if !clean_line.is_empty() {
-                cleaned_lines.push(clean_line);
             }
         }
         
@@ -164,10 +187,49 @@ impl TemplateEngine {
         
         // If we've removed everything, return a safe response
         if result.is_empty() {
-            return "I'm here to help. What would you like to know?".to_string();
+            EMPTY_RESPONSE_FALLBACK.to_string()
+        } else {
+            result
+        }
+    }
+    
+    /// Check if text contains dialogue pattern
+    fn has_dialogue_pattern(text: &str) -> bool {
+        text.contains("AI:") && text.contains("You:")
+    }
+    
+    /// Clean role markers from a single line
+    fn clean_role_from_line(line: &str) -> Option<String> {
+        let trimmed = line.trim_start();
+        
+        // Check if line starts with any role pattern
+        for pattern in ROLE_PATTERNS {
+            if trimmed.starts_with(pattern) {
+                let remainder = trimmed
+                    .trim_start_matches(pattern)
+                    .trim();
+                
+                // If there's actual content after the role marker, return it
+                if !remainder.is_empty() {
+                    return Some(remainder.to_string());
+                } else {
+                    // Empty after role marker, skip this line
+                    return None;
+                }
+            }
         }
         
-        result
+        // Line doesn't start with role pattern, check for mid-line markers
+        let mut cleaned = line.to_string();
+        for pattern in ROLE_PATTERNS {
+            if cleaned.contains(pattern) && !cleaned.starts_with(pattern) {
+                // Only remove if it looks like an obvious role marker
+                cleaned = cleaned.replace(&format!("\n{}", pattern), "\n");
+                cleaned = cleaned.replace(&format!(". {}", pattern), ". ");
+            }
+        }
+        
+        Some(cleaned)
     }
     
     /// Check if text contains stop sequence
@@ -212,11 +274,9 @@ impl TemplateEngine {
         }
         
         // No stop sequence yet - emit only the new content if it's safe
-        // We check from where we started to avoid re-emitting
         let new_content = &buffer[start_len..];
         
         // For simplicity in streaming, just emit the new content after basic cleaning
-        // The buffer maintains everything for the final clean_response call
         if !new_content.is_empty() {
             let cleaned = Self::remove_role_pollution(new_content);
             StreamChunkResult::Partial {
@@ -225,48 +285,6 @@ impl TemplateEngine {
         } else {
             StreamChunkResult::Buffering
         }
-    }
-    
-    /// Find a safe position to emit content without breaking template markers
-    fn find_safe_emit_position(buffer: &str, template: &TemplateConfig) -> usize {
-        // Collect all template markers to watch for
-        let markers: HashSet<&str> = vec![
-            &template.system_prefix,
-            &template.system_suffix,
-            &template.user_prefix,
-            &template.user_suffix,
-            &template.assistant_prefix,
-            &template.assistant_suffix,
-            "<|",  // Common marker prefix
-            "###", // Common instruction marker
-        ].into_iter()
-        .filter(|s| !s.is_empty())
-        .collect();
-        
-        // Find the last safe position to emit
-        let mut safe_pos = 0;
-        let chars: Vec<char> = buffer.chars().collect();
-        
-        for i in 0..chars.len() {
-            let remaining = buffer[i..].to_string();
-            
-            // Check if we're at the start of any marker
-            let mut at_marker_start = false;
-            for marker in &markers {
-                if remaining.starts_with(marker) || marker.starts_with(&remaining) {
-                    at_marker_start = true;
-                    break;
-                }
-            }
-            
-            if !at_marker_start {
-                safe_pos = i + chars[i].len_utf8();
-            } else {
-                break;
-            }
-        }
-        
-        safe_pos
     }
 }
 
